@@ -16,6 +16,8 @@ pipeline {
         K8S_CONTAINER  = 'app'
 
         ALB_URL        = 'http://k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com'
+
+        DEPLOYMENT_STARTED = 'false'
     }
 
     stages {
@@ -118,34 +120,42 @@ PY
 
         stage('Deploy to EKS') {
             steps {
-                sh '''
-                    set -e
+                script {
+                    sh '''
+                        set -e
 
-                    echo "========================================"
-                    echo "Deploying to EKS"
-                    echo "========================================"
+                        echo "========================================"
+                        echo "Deploying to EKS"
+                        echo "========================================"
 
-                    echo "Updating kubeconfig..."
+                        echo "Updating kubeconfig..."
 
-                    aws eks update-kubeconfig \
-                        --region "${AWS_REGION}" \
-                        --name "${EKS_CLUSTER}"
+                        aws eks update-kubeconfig \
+                            --region "${AWS_REGION}" \
+                            --name "${EKS_CLUSTER}"
 
-                    echo "Deploying image:"
-                    echo "${IMAGE_NAME}"
+                        echo "Deploying image:"
+                        echo "${IMAGE_NAME}"
 
-                    kubectl set image \
-                        deployment/${K8S_DEPLOYMENT} \
-                        ${K8S_CONTAINER}="${IMAGE_NAME}" \
-                        --namespace "${K8S_NAMESPACE}"
+                        kubectl set image \
+                            deployment/${K8S_DEPLOYMENT} \
+                            ${K8S_CONTAINER}="${IMAGE_NAME}" \
+                            --namespace "${K8S_NAMESPACE}"
+                    '''
 
-                    echo "Waiting for Kubernetes rollout..."
+                    env.DEPLOYMENT_STARTED = 'true'
 
-                    kubectl rollout status \
-                        deployment/${K8S_DEPLOYMENT} \
-                        --namespace "${K8S_NAMESPACE}" \
-                        --timeout=5m
-                '''
+                    sh '''
+                        set -e
+
+                        echo "Waiting for Kubernetes rollout..."
+
+                        kubectl rollout status \
+                            deployment/${K8S_DEPLOYMENT} \
+                            --namespace "${K8S_NAMESPACE}" \
+                            --timeout=5m
+                    '''
+                }
             }
         }
 
@@ -195,27 +205,70 @@ PY
                     echo "ALB Smoke Test"
                     echo "========================================"
 
-                    echo "Testing /health..."
+                    MAX_ATTEMPTS=6
+                    SLEEP_SECONDS=5
 
-                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-                        "${ALB_URL}/health")
+                    echo "Testing ALB health endpoint..."
 
-                    echo "Health endpoint HTTP status: ${HTTP_CODE}"
+                    HEALTH_SUCCESS=false
 
-                    if [ "${HTTP_CODE}" != "200" ]; then
-                        echo "ALB health check failed"
+                    for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
+
+                        echo "Health check attempt ${ATTEMPT}/${MAX_ATTEMPTS}"
+
+                        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                            --max-time 10 \
+                            "${ALB_URL}/health" || true)
+
+                        echo "Health endpoint HTTP status: ${HTTP_CODE}"
+
+                        if [ "${HTTP_CODE}" = "200" ]; then
+                            HEALTH_SUCCESS=true
+                            break
+                        fi
+
+                        if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+                            echo "Health check failed. Waiting ${SLEEP_SECONDS} seconds..."
+                            sleep "${SLEEP_SECONDS}"
+                        fi
+                    done
+
+                    if [ "${HEALTH_SUCCESS}" != "true" ]; then
+                        echo "ALB health check failed after ${MAX_ATTEMPTS} attempts."
                         exit 1
                     fi
 
                     echo ""
                     echo "Testing application endpoint..."
 
-                    RESPONSE=$(curl -fsS "${ALB_URL}/")
+                    RESPONSE=""
 
+                    for ATTEMPT in $(seq 1 ${MAX_ATTEMPTS}); do
+
+                        echo "Application check attempt ${ATTEMPT}/${MAX_ATTEMPTS}"
+
+                        RESPONSE=$(curl -fsS \
+                            --max-time 10 \
+                            "${ALB_URL}/" || true)
+
+                        if echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
+                            echo "Application version ${IMAGE_TAG} verified."
+                            break
+                        fi
+
+                        if [ "${ATTEMPT}" -lt "${MAX_ATTEMPTS}" ]; then
+                            echo "Expected application version not detected."
+                            echo "Waiting ${SLEEP_SECONDS} seconds..."
+                            sleep "${SLEEP_SECONDS}"
+                        fi
+                    done
+
+                    echo ""
+                    echo "ALB response:"
                     echo "${RESPONSE}"
 
                     echo ""
-                    echo "Checking deployed application version..."
+                    echo "Final version validation..."
 
                     echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"
 
@@ -242,6 +295,59 @@ PY
             echo "========================================"
             echo "CI/CD PIPELINE FAILED"
             echo "========================================"
+
+            script {
+                if (env.DEPLOYMENT_STARTED == 'true') {
+
+                    echo "A Kubernetes deployment was started."
+                    echo "Initiating automatic rollback..."
+
+                    sh '''
+                        set +e
+
+                        echo "========================================"
+                        echo "AUTOMATIC ROLLBACK"
+                        echo "========================================"
+
+                        echo "Current deployment image:"
+                        kubectl get deployment "${K8S_DEPLOYMENT}" \
+                            --namespace "${K8S_NAMESPACE}" \
+                            -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+                        echo ""
+
+                        echo "Rolling back deployment..."
+
+                        kubectl rollout undo \
+                            deployment/${K8S_DEPLOYMENT} \
+                            --namespace "${K8S_NAMESPACE}"
+
+                        echo ""
+                        echo "Waiting for rollback to complete..."
+
+                        kubectl rollout status \
+                            deployment/${K8S_DEPLOYMENT} \
+                            --namespace "${K8S_NAMESPACE}" \
+                            --timeout=5m
+
+                        echo ""
+                        echo "Deployment image after rollback:"
+
+                        kubectl get deployment "${K8S_DEPLOYMENT}" \
+                            --namespace "${K8S_NAMESPACE}" \
+                            -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+                        echo ""
+
+                        echo "Automatic rollback completed."
+                    '''
+
+                } else {
+
+                    echo "No Kubernetes deployment was started."
+                    echo "Rollback is not required."
+                }
+            }
         }
 
         always {
