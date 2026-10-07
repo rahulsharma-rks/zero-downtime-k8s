@@ -22,8 +22,6 @@ pipeline {
         IMAGE_NAME      = "520701146276.dkr.ecr.ap-south-1.amazonaws.com/zero-downtime-app:${BUILD_NUMBER}"
 
         ALB_DNS         = 'k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com'
-
-        ROLLBACK_PERFORMED = 'false'
     }
 
     stages {
@@ -111,11 +109,6 @@ pipeline {
             steps {
                 script {
 
-                    /*
-                     * =========================================================
-                     * Kubernetes access
-                     * =========================================================
-                     */
                     sh '''
                         set -e
 
@@ -139,18 +132,6 @@ pipeline {
                         echo "Kubernetes access check successful."
                     '''
 
-                    /*
-                     * =========================================================
-                     * Capture current deployment image.
-                     *
-                     * IMPORTANT:
-                     * Do this entirely inside one shell block and persist
-                     * the result in a workspace file.
-                     *
-                     * This avoids relying on Groovy sh(returnStdout)
-                     * state propagation.
-                     * =========================================================
-                     */
                     sh '''
                         set -eu
 
@@ -165,47 +146,35 @@ pipeline {
                             -o jsonpath='{.spec.template.spec.containers[0].image}' \
                             > .previous_image
 
-                        echo "Captured previous image:"
-                        cat .previous_image
-                        echo
-
                         if [ ! -s .previous_image ]; then
-                            echo "ERROR: Previous image file is empty."
-                            echo "Refusing to deploy because automatic rollback would be unsafe."
+                            echo "ERROR: Previous image could not be determined."
                             exit 1
                         fi
 
                         PREVIOUS_IMAGE=$(cat .previous_image)
-
-                        case "${PREVIOUS_IMAGE}" in
-                            "${ECR_REGISTRY}/${ECR_REPOSITORY}:"*)
-                                ;;
-                            *)
-                                echo "ERROR: Previous image does not belong to the expected ECR repository:"
-                                echo "${PREVIOUS_IMAGE}"
-                                exit 1
-                                ;;
-                        esac
-
                         PREVIOUS_VERSION="${PREVIOUS_IMAGE##*:}"
-
-                        if [ -z "${PREVIOUS_VERSION}" ]; then
-                            echo "ERROR: Could not determine previous image version."
-                            exit 1
-                        fi
 
                         echo "Previous image:"
                         echo "${PREVIOUS_IMAGE}"
 
                         echo "Previous version:"
                         echo "${PREVIOUS_VERSION}"
+
+                        case "${PREVIOUS_IMAGE}" in
+                            "${ECR_REGISTRY}/${ECR_REPOSITORY}:"*)
+                                ;;
+                            *)
+                                echo "ERROR: Previous image is not from the expected ECR repository."
+                                exit 1
+                                ;;
+                        esac
+
+                        if [ -z "${PREVIOUS_VERSION}" ]; then
+                            echo "ERROR: Previous image version is empty."
+                            exit 1
+                        fi
                     '''
 
-                    /*
-                     * =========================================================
-                     * Display deployment state.
-                     * =========================================================
-                     */
                     sh '''
                         set -e
 
@@ -222,14 +191,6 @@ pipeline {
                         echo "========================================="
                     '''
 
-                    /*
-                     * =========================================================
-                     * Deploy new version.
-                     *
-                     * returnStatus is used only for rollout status.
-                     * The previous image remains safely stored in the file.
-                     * =========================================================
-                     */
                     int rolloutStatus = sh(
                         script: '''
                             set +e
@@ -264,11 +225,6 @@ pipeline {
                         returnStatus: true
                     )
 
-                    /*
-                     * =========================================================
-                     * Automatic rollback
-                     * =========================================================
-                     */
                     if (rolloutStatus != 0) {
 
                         echo "========================================="
@@ -276,15 +232,11 @@ pipeline {
                         echo "Starting automatic rollback"
                         echo "========================================="
 
-                        /*
-                         * Read the previous image directly from the
-                         * workspace file.
-                         */
                         sh '''
                             set -eu
 
                             if [ ! -s .previous_image ]; then
-                                echo "ERROR: .previous_image does not exist or is empty."
+                                echo "ERROR: Previous image file is missing."
                                 exit 1
                             fi
 
@@ -308,17 +260,6 @@ pipeline {
                             echo "Rollback rollout completed."
                         '''
 
-                        /*
-                         * Mark rollback as performed only after the rollback
-                         * command and rollout have succeeded.
-                         */
-                        env.ROLLBACK_PERFORMED = 'true'
-
-                        /*
-                         * =====================================================
-                         * Verify exact image restoration
-                         * =====================================================
-                         */
                         sh '''
                             set -eu
 
@@ -342,11 +283,6 @@ pipeline {
                             echo "Exact previous image restored successfully."
                         '''
 
-                        /*
-                         * =====================================================
-                         * Verify Ready replicas
-                         * =====================================================
-                         */
                         sh '''
                             set -eu
 
@@ -369,11 +305,6 @@ pipeline {
                             echo "Rollback replicas healthy: ${READY_REPLICAS}/${DESIRED_REPLICAS}"
                         '''
 
-                        /*
-                         * =====================================================
-                         * Verify ALB health
-                         * =====================================================
-                         */
                         sh '''
                             set -eu
 
@@ -397,12 +328,6 @@ pipeline {
                             echo "ALB health check passed."
                         '''
 
-                        /*
-                         * =====================================================
-                         * Verify ALB serves restored version and does not
-                         * serve the failed version.
-                         * =====================================================
-                         */
                         sh '''
                             set -eu
 
@@ -414,16 +339,13 @@ pipeline {
                             echo "ALB application response:"
                             echo "${RESPONSE}"
 
-                            echo "${RESPONSE}" | grep -q \
-                                "<strong>${PREVIOUS_VERSION}</strong>" || {
-                                    echo "ERROR: ALB is not serving restored version ${PREVIOUS_VERSION}."
-                                    exit 1
-                                }
+                            if ! echo "${RESPONSE}" | grep -q "<strong>${PREVIOUS_VERSION}</strong>"; then
+                                echo "ERROR: ALB is not serving restored version ${PREVIOUS_VERSION}."
+                                exit 1
+                            fi
 
-                            if echo "${RESPONSE}" | grep -q \
-                                "<strong>${IMAGE_TAG}</strong>"; then
-
-                                echo "ERROR: Failed version ${IMAGE_TAG} is still being served by ALB."
+                            if echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
+                                echo "ERROR: Failed version ${IMAGE_TAG} is still being served."
                                 exit 1
                             fi
 
@@ -475,7 +397,8 @@ pipeline {
                     elif [ -s .previous_image ] && [ "${DEPLOYED_IMAGE}" = "$(cat .previous_image)" ]; then
                         echo "Deployment contains the restored previous image."
                     else
-                        echo "ERROR: Unexpected deployed image: ${DEPLOYED_IMAGE}"
+                        echo "ERROR: Unexpected deployed image:"
+                        echo "${DEPLOYED_IMAGE}"
                         exit 1
                     fi
 
@@ -500,11 +423,6 @@ pipeline {
                     echo "${DEPLOYED_IMAGE}"
                     echo "========================================="
 
-                    /*
-                     * =========================================================
-                     * Normal deployment path
-                     * =========================================================
-                     */
                     if [ "${DEPLOYED_IMAGE}" = "${IMAGE_NAME}" ]; then
 
                         echo "Deployment state: NEW VERSION"
@@ -525,20 +443,14 @@ pipeline {
                         echo "ALB response:"
                         echo "${RESPONSE}"
 
-                        echo "${RESPONSE}" | grep -q \
-                            "<strong>${IMAGE_TAG}</strong>" || {
-                                echo "ERROR: Expected version ${IMAGE_TAG} was not served by ALB."
-                                exit 1
-                            }
+                        if ! echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
+                            echo "ERROR: Expected version ${IMAGE_TAG} was not served by ALB."
+                            exit 1
+                        fi
 
                         echo "ALB smoke test passed."
                         echo "Version ${IMAGE_TAG} is being served."
 
-                    /*
-                     * =========================================================
-                     * Automatic rollback path
-                     * =========================================================
-                     */
                     elif [ -s .previous_image ] && [ "${DEPLOYED_IMAGE}" = "$(cat .previous_image)" ]; then
 
                         PREVIOUS_IMAGE=$(cat .previous_image)
@@ -563,15 +475,12 @@ pipeline {
                         echo "ALB response:"
                         echo "${RESPONSE}"
 
-                        echo "${RESPONSE}" | grep -q \
-                            "<strong>${RESTORED_VERSION}</strong>" || {
-                                echo "ERROR: ALB is not serving restored version ${RESTORED_VERSION}."
-                                exit 1
-                            }
+                        if ! echo "${RESPONSE}" | grep -q "<strong>${RESTORED_VERSION}</strong>"; then
+                            echo "ERROR: ALB is not serving restored version ${RESTORED_VERSION}."
+                            exit 1
+                        fi
 
-                        if echo "${RESPONSE}" | grep -q \
-                            "<strong>${IMAGE_TAG}</strong>"; then
-
+                        if echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
                             echo "ERROR: Failed version ${IMAGE_TAG} is still being served."
                             exit 1
                         fi
@@ -581,9 +490,11 @@ pipeline {
                         echo "Failed version ${IMAGE_TAG} is not being served."
 
                     else
+
                         echo "ERROR: Unexpected deployment image:"
                         echo "${DEPLOYED_IMAGE}"
                         exit 1
+
                     fi
                 '''
             }
@@ -594,18 +505,14 @@ pipeline {
 
         success {
             script {
+
                 echo "========================================="
                 echo "PIPELINE SUCCESSFUL"
                 echo "========================================="
 
-                if (env.ROLLBACK_PERFORMED == 'true') {
+                if (fileExists('.previous_image')) {
                     echo "Automatic rollback was successfully completed and verified."
-
-                    sh '''
-                        if [ -s .previous_image ]; then
-                            echo "Restored image: $(cat .previous_image)"
-                        fi
-                    '''
+                    echo "Restored image: ${readFile('.previous_image').trim()}"
                 } else {
                     echo "Deployment completed successfully."
                     echo "Deployed image: ${env.IMAGE_NAME}"
@@ -617,20 +524,37 @@ pipeline {
 
         failure {
             script {
+
                 echo "========================================="
                 echo "PIPELINE FAILED"
                 echo "========================================="
 
-                if (env.ROLLBACK_PERFORMED == 'true') {
-                    echo "Automatic rollback was completed before a later verification stage failed."
+                if (fileExists('.previous_image')) {
 
-                    sh '''
-                        if [ -s .previous_image ]; then
-                            echo "Restored image: $(cat .previous_image)"
-                        fi
-                    '''
+                    def previousImage = readFile('.previous_image').trim()
+
+                    def currentImage = sh(
+                        script: '''
+                            kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.spec.template.spec.containers[0].image}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
+
+                    if (currentImage == previousImage) {
+                        echo "Automatic rollback completed."
+                        echo "Restored image: ${currentImage}"
+                        echo "The pipeline failed during a later verification/reporting step."
+                    } else {
+                        echo "Automatic rollback was not successfully completed."
+                        echo "Current image: ${currentImage}"
+                        echo "Expected previous image: ${previousImage}"
+                    }
+
                 } else {
-                    echo "Automatic rollback was not successfully completed."
+                    echo "Previous deployment image was not recorded."
+                    echo "Automatic rollback status could not be determined."
                 }
 
                 echo "========================================="
@@ -646,8 +570,6 @@ pipeline {
                 echo "========================================="
 
                 docker logout "${ECR_REGISTRY}" >/dev/null 2>&1 || true
-
-                rm -f .previous_image
 
                 echo "Cleanup completed."
             '''
