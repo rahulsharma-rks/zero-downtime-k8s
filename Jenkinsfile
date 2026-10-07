@@ -101,8 +101,9 @@ pipeline {
                         app/
 
                     echo "Docker image built successfully:"
+
                     docker images "${ECR_REGISTRY}/${ECR_REPOSITORY}" \
-                        --format "table {{.Repository}}\\t{{.Tag}}\\t{{.ID}}\\t{{.Size}}"
+                        --format "table {{.Repository}}\t{{.Tag}}\t{{.ID}}\t{{.Size}}"
                 '''
             }
         }
@@ -144,6 +145,7 @@ pipeline {
 
                     echo ""
                     echo "Image digest:"
+
                     docker inspect "${IMAGE_NAME}" \
                         --format '{{index .RepoDigests 0}}' || true
                 '''
@@ -212,6 +214,7 @@ pipeline {
         stage('Deploy') {
             steps {
                 script {
+
                     sh '''
                         set -e
 
@@ -382,24 +385,15 @@ pipeline {
                                 --max-time 15 \
                                 "${ALB_URL}/")
 
+                            EXPECTED_IMAGE=$(cat .previous_image)
+                            EXPECTED_TAG="${EXPECTED_IMAGE##*:}"
+
+                            echo "Expected restored version: ${EXPECTED_TAG}"
                             echo "ALB response:"
                             echo "${RESPONSE}"
 
-                            EXPECTED_IMAGE=$(cat .previous_image)
-
-                            case "${EXPECTED_IMAGE}" in
-                                *:)
-                                    echo "ERROR: Invalid previous image format."
-                                    exit 1
-                                    ;;
-                            esac
-
-                            EXPECTED_TAG="${EXPECTED_IMAGE##*:}"
-
-                            echo ""
-                            echo "Expected restored version: ${EXPECTED_TAG}"
-
-                            if ! echo "${RESPONSE}" | grep -q "Application Version: <strong>${EXPECTED_TAG}</strong>"; then
+                            if ! echo "${RESPONSE}" | grep -q \
+                                "Application Version: <strong>${EXPECTED_TAG}</strong>"; then
                                 echo "ERROR: ALB is not serving the restored version."
                                 exit 1
                             fi
@@ -407,15 +401,26 @@ pipeline {
                             echo "ALB is serving the restored version."
                         '''
 
-                        if (sh(
-                            script: '''
-                                curl -sS --max-time 15 "${ALB_URL}/" \
-                                    | grep -q "Application Version: <strong>${IMAGE_TAG}</strong>"
-                            ''',
-                            returnStatus: true
-                        ) == 0) {
-                            error("ERROR: Failed version ${IMAGE_TAG} is still being served by ALB.")
-                        }
+                        sh '''
+                            set -e
+
+                            echo "=========================================="
+                            echo "VERIFY FAILED VERSION IS NOT SERVED"
+                            echo "=========================================="
+
+                            RESPONSE=$(curl \
+                                -sS \
+                                --max-time 15 \
+                                "${ALB_URL}/")
+
+                            if echo "${RESPONSE}" | grep -q \
+                                "Application Version: <strong>${IMAGE_TAG}</strong>"; then
+                                echo "ERROR: Failed version ${IMAGE_TAG} is still being served."
+                                exit 1
+                            fi
+
+                            echo "Failed version ${IMAGE_TAG} is not being served."
+                        '''
 
                         sh '''
                             set -e
@@ -473,18 +478,25 @@ pipeline {
                     fi
 
                     if [ -f .rollback_verified ]; then
+
                         EXPECTED_IMAGE=$(cat .previous_image)
 
                         if [ "${DEPLOYED_IMAGE}" != "${EXPECTED_IMAGE}" ]; then
                             echo "ERROR: Restored image does not match expected previous image."
                             exit 1
                         fi
-                    else {
+
+                        echo "Rollback image verification passed."
+
+                    else
+
                         if [ "${DEPLOYED_IMAGE}" != "${IMAGE_NAME}" ]; then
                             echo "ERROR: Deployment image does not match new image."
                             exit 1
                         fi
-                    }
+
+                        echo "New deployment image verification passed."
+                    fi
 
                     echo "Deployment verification passed."
                 '''
@@ -537,7 +549,8 @@ pipeline {
 
                         echo "Detected successful new deployment."
 
-                        if ! echo "${RESPONSE}" | grep -q "Application Version: <strong>${IMAGE_TAG}</strong>"; then
+                        if ! echo "${RESPONSE}" | grep -q \
+                            "Application Version: <strong>${IMAGE_TAG}</strong>"; then
                             echo "ERROR: ALB is not serving the newly deployed version."
                             exit 1
                         fi
@@ -558,12 +571,14 @@ pipeline {
                             exit 1
                         fi
 
-                        if ! echo "${RESPONSE}" | grep -q "Application Version: <strong>${EXPECTED_TAG}</strong>"; then
+                        if ! echo "${RESPONSE}" | grep -q \
+                            "Application Version: <strong>${EXPECTED_TAG}</strong>"; then
                             echo "ERROR: ALB is not serving the restored version."
                             exit 1
                         fi
 
-                        if echo "${RESPONSE}" | grep -q "Application Version: <strong>${IMAGE_TAG}</strong>"; then
+                        if echo "${RESPONSE}" | grep -q \
+                            "Application Version: <strong>${IMAGE_TAG}</strong>"; then
                             echo "ERROR: Failed version is still being served."
                             exit 1
                         fi
@@ -581,28 +596,35 @@ pipeline {
         success {
             script {
                 if (fileExists('.rollback_verified')) {
+
+                    String restoredImage = sh(
+                        script: 'cat .previous_image',
+                        returnStdout: true
+                    ).trim()
+
                     echo "=========================================="
                     echo "PIPELINE SUCCESSFUL"
                     echo "=========================================="
                     echo "Deployment failed its rollout."
                     echo "Automatic rollback was completed and verified."
-                    echo "Restored image: ${sh(
-                        script: 'cat .previous_image',
-                        returnStdout: true
-                    ).trim()}"
+                    echo "Restored image: ${restoredImage}"
+
                 } else {
-                    sh '''
-                        echo "=========================================="
-                        echo "PIPELINE SUCCESSFUL"
-                        echo "=========================================="
-                        echo "Deployment completed successfully."
 
-                        DEPLOYED_IMAGE=$(kubectl get deployment "${K8S_DEPLOYMENT}" \
-                            -n "${K8S_NAMESPACE}" \
-                            -o jsonpath='{.spec.template.spec.containers[0].image}')
+                    String deployedImage = sh(
+                        script: '''
+                            kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.spec.template.spec.containers[0].image}'
+                        ''',
+                        returnStdout: true
+                    ).trim()
 
-                        echo "Deployed image: ${DEPLOYED_IMAGE}"
-                    '''
+                    echo "=========================================="
+                    echo "PIPELINE SUCCESSFUL"
+                    echo "=========================================="
+                    echo "Deployment completed successfully."
+                    echo "Deployed image: ${deployedImage}"
                 }
             }
         }
@@ -610,16 +632,21 @@ pipeline {
         failure {
             script {
                 if (fileExists('.rollback_verified')) {
+
+                    String restoredImage = sh(
+                        script: 'cat .previous_image',
+                        returnStdout: true
+                    ).trim()
+
                     echo "=========================================="
                     echo "PIPELINE FAILED AFTER AUTOMATIC ROLLBACK"
                     echo "=========================================="
                     echo "The deployment failed."
                     echo "Automatic rollback was completed and verified."
-                    echo "Restored image: ${sh(
-                        script: 'cat .previous_image',
-                        returnStdout: true
-                    ).trim()}"
+                    echo "Restored image: ${restoredImage}"
+
                 } else {
+
                     echo "=========================================="
                     echo "PIPELINE FAILED"
                     echo "=========================================="
