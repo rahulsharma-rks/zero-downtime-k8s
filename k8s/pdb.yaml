@@ -1,0 +1,10 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: zero-downtime-app
+  namespace: zero-downtime
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: zero-downtime-app
