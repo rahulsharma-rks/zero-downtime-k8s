@@ -17,8 +17,6 @@ pipeline {
         K8S_CONTAINER = 'app'
 
         ALB_URL = 'http://k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com'
-
-        DEPLOYMENT_STARTED = 'false'
     }
 
     stages {
@@ -142,21 +140,20 @@ PY
                             --namespace "${K8S_NAMESPACE}"
 
                         echo "Kubernetes deployment update accepted."
-                    '''
 
-                    /*
-                     * IMPORTANT:
-                     * Set this immediately after kubectl set image succeeds.
-                     *
-                     * If rollout status fails or times out, Jenkins still knows
-                     * that a deployment was already started and must be rolled back.
-                     */
-                    env.DEPLOYMENT_STARTED = 'true'
+                        echo "Creating deployment marker..."
+
+                        touch .deployment_started
+
+                        echo "Deployment marker created."
+                    '''
 
                     sh '''
                         set -e
 
-                        echo "Waiting for Kubernetes rollout..."
+                        echo "========================================"
+                        echo "Waiting for Kubernetes Rollout"
+                        echo "========================================"
 
                         kubectl rollout status \
                             deployment/${K8S_DEPLOYMENT} \
@@ -188,6 +185,7 @@ PY
 
                     echo ""
                     echo "Deployed image:"
+
                     kubectl get deployment "${K8S_DEPLOYMENT}" \
                         -n "${K8S_NAMESPACE}" \
                         -o jsonpath='{.spec.template.spec.containers[0].image}{"\\n"}'
@@ -210,6 +208,7 @@ PY
                     echo "Testing ALB health endpoint..."
 
                     for i in $(seq 1 ${MAX_ATTEMPTS}); do
+
                         echo "Health check attempt ${i}/${MAX_ATTEMPTS}"
 
                         HTTP_STATUS=$(curl \
@@ -238,6 +237,7 @@ PY
                     echo "Testing application endpoint..."
 
                     for i in $(seq 1 ${MAX_ATTEMPTS}); do
+
                         echo "Application check attempt ${i}/${MAX_ATTEMPTS}"
 
                         RESPONSE=$(curl \
@@ -247,7 +247,9 @@ PY
 
                         echo "${RESPONSE}"
 
-                        if echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
+                        if echo "${RESPONSE}" | \
+                            grep -q "<strong>${IMAGE_TAG}</strong>"; then
+
                             echo "Application version ${IMAGE_TAG} is being served."
                             break
                         fi
@@ -284,167 +286,164 @@ PY
 
             script {
 
-                if (env.DEPLOYMENT_STARTED == 'true') {
+                if (fileExists('.deployment_started')) {
 
-                    echo "A Kubernetes deployment was started."
+                    echo "Kubernetes deployment was started."
                     echo "Automatic rollback will now be attempted."
 
-                    /*
-                     * Do not allow rollback commands to hide the original
-                     * deployment failure.
-                     */
-                    sh '''
-                        set +e
+                    def rollbackStatus = sh(
+                        script: '''
+                            set -e
 
-                        echo "========================================"
-                        echo "Starting Automatic Rollback"
-                        echo "========================================"
+                            echo "========================================"
+                            echo "Starting Automatic Rollback"
+                            echo "========================================"
 
-                        echo "Current deployment image:"
-                        kubectl get deployment "${K8S_DEPLOYMENT}" \
-                            -n "${K8S_NAMESPACE}" \
-                            -o jsonpath='{.spec.template.spec.containers[0].image}{"\\n"}'
+                            echo "Failed image:"
+                            echo "${IMAGE_NAME}"
 
-                        echo ""
-                        echo "Rolling back deployment..."
+                            echo ""
+                            echo "Current deployment image:"
 
-                        kubectl rollout undo \
-                            deployment/${K8S_DEPLOYMENT} \
-                            --namespace "${K8S_NAMESPACE}"
+                            kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.spec.template.spec.containers[0].image}{"\\n"}'
 
-                        if [ $? -ne 0 ]; then
-                            echo "ERROR: kubectl rollout undo failed."
-                            exit 1
-                        fi
+                            echo ""
+                            echo "Rolling back deployment..."
 
-                        echo ""
-                        echo "Waiting for rollback to complete..."
+                            kubectl rollout undo \
+                                deployment/${K8S_DEPLOYMENT} \
+                                --namespace "${K8S_NAMESPACE}"
 
-                        kubectl rollout status \
-                            deployment/${K8S_DEPLOYMENT} \
-                            --namespace "${K8S_NAMESPACE}" \
-                            --timeout=5m
+                            echo ""
+                            echo "Waiting for rollback to complete..."
 
-                        if [ $? -ne 0 ]; then
-                            echo "ERROR: Kubernetes rollback did not complete successfully."
-                            exit 1
-                        fi
+                            kubectl rollout status \
+                                deployment/${K8S_DEPLOYMENT} \
+                                --namespace "${K8S_NAMESPACE}" \
+                                --timeout=5m
 
-                        echo ""
-                        echo "Rollback completed successfully."
+                            echo ""
+                            echo "Rollback completed successfully."
 
-                        echo ""
-                        echo "Restored deployment image:"
+                            echo ""
+                            echo "Restored deployment image:"
 
-                        RESTORED_IMAGE=$(kubectl get deployment "${K8S_DEPLOYMENT}" \
-                            -n "${K8S_NAMESPACE}" \
-                            -o jsonpath='{.spec.template.spec.containers[0].image}')
+                            RESTORED_IMAGE=$(kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-                        echo "${RESTORED_IMAGE}"
+                            echo "${RESTORED_IMAGE}"
 
-                        if [ -z "${RESTORED_IMAGE}" ]; then
-                            echo "ERROR: Could not determine restored image."
-                            exit 1
-                        fi
-
-                        if [ "${RESTORED_IMAGE}" = "${IMAGE_NAME}" ]; then
-                            echo "ERROR: Deployment still references failed image ${IMAGE_NAME}."
-                            exit 1
-                        fi
-
-                        echo ""
-                        echo "Rollback image verification passed."
-
-                        echo ""
-                        echo "========================================"
-                        echo "Verifying ALB After Rollback"
-                        echo "========================================"
-
-                        MAX_ATTEMPTS=12
-                        SLEEP_SECONDS=5
-
-                        echo "Waiting for ALB health after rollback..."
-
-                        ALB_HEALTH_PASSED=false
-
-                        for i in $(seq 1 ${MAX_ATTEMPTS}); do
-
-                            echo "ALB health attempt ${i}/${MAX_ATTEMPTS}"
-
-                            HTTP_STATUS=$(curl \
-                                --silent \
-                                --output /dev/null \
-                                --write-out "%{http_code}" \
-                                --max-time 10 \
-                                "${ALB_URL}/health" || true)
-
-                            echo "HTTP status: ${HTTP_STATUS}"
-
-                            if [ "${HTTP_STATUS}" = "200" ]; then
-                                ALB_HEALTH_PASSED=true
-                                echo "ALB health check passed."
-                                break
+                            if [ -z "${RESTORED_IMAGE}" ]; then
+                                echo "ERROR: Could not determine restored image."
+                                exit 1
                             fi
 
-                            sleep "${SLEEP_SECONDS}"
-                        done
-
-                        if [ "${ALB_HEALTH_PASSED}" != "true" ]; then
-                            echo "ERROR: ALB health check failed after rollback."
-                            exit 1
-                        fi
-
-                        echo ""
-                        echo "Checking application response after rollback..."
-
-                        ALB_RESPONSE=""
-
-                        for i in $(seq 1 ${MAX_ATTEMPTS}); do
-
-                            echo "Application verification attempt ${i}/${MAX_ATTEMPTS}"
-
-                            ALB_RESPONSE=$(curl \
-                                --silent \
-                                --max-time 10 \
-                                "${ALB_URL}/" || true)
-
-                            echo "${ALB_RESPONSE}"
-
-                            if [ -n "${ALB_RESPONSE}" ] && \
-                               echo "${ALB_RESPONSE}" | grep -q "Zero Downtime Kubernetes Demo"; then
-                                echo "Application response is healthy."
-                                break
+                            if [ "${RESTORED_IMAGE}" = "${IMAGE_NAME}" ]; then
+                                echo "ERROR: Failed image is still deployed."
+                                exit 1
                             fi
 
-                            sleep "${SLEEP_SECONDS}"
-                        done
+                            echo ""
+                            echo "Rollback image verification passed."
 
-                        if ! echo "${ALB_RESPONSE}" | grep -q "Zero Downtime Kubernetes Demo"; then
-                            echo "ERROR: Application verification failed after rollback."
-                            exit 1
-                        fi
+                            echo "========================================"
+                            echo "Verifying ALB After Rollback"
+                            echo "========================================"
 
-                        echo ""
-                        echo "Ensuring failed image is no longer being served..."
+                            MAX_ATTEMPTS=12
+                            SLEEP_SECONDS=5
 
-                        if echo "${ALB_RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
-                            echo "ERROR: Failed image version ${IMAGE_TAG} is still being served by ALB."
-                            exit 1
-                        fi
+                            ALB_HEALTH_PASSED=false
 
-                        echo ""
-                        echo "========================================"
-                        echo "AUTOMATIC ROLLBACK VERIFIED"
-                        echo "========================================"
-                        echo "Failed image:    ${IMAGE_NAME}"
-                        echo "Restored image:  ${RESTORED_IMAGE}"
-                        echo "ALB health:      HTTP 200"
-                        echo "ALB application: Healthy"
-                        echo "Failed version:  No longer served"
-                    '''
+                            for i in $(seq 1 ${MAX_ATTEMPTS}); do
 
-                    if (sh(script: 'true', returnStatus: true) != 0) {
-                        error('Automatic rollback verification failed.')
+                                echo "ALB health attempt ${i}/${MAX_ATTEMPTS}"
+
+                                HTTP_STATUS=$(curl \
+                                    --silent \
+                                    --output /dev/null \
+                                    --write-out "%{http_code}" \
+                                    --max-time 10 \
+                                    "${ALB_URL}/health" || true)
+
+                                echo "HTTP status: ${HTTP_STATUS}"
+
+                                if [ "${HTTP_STATUS}" = "200" ]; then
+                                    ALB_HEALTH_PASSED=true
+                                    echo "ALB health check passed."
+                                    break
+                                fi
+
+                                sleep "${SLEEP_SECONDS}"
+                            done
+
+                            if [ "${ALB_HEALTH_PASSED}" != "true" ]; then
+                                echo "ERROR: ALB health check failed after rollback."
+                                exit 1
+                            fi
+
+                            echo ""
+                            echo "Checking application response after rollback..."
+
+                            ALB_RESPONSE=""
+
+                            for i in $(seq 1 ${MAX_ATTEMPTS}); do
+
+                                echo "Application verification attempt ${i}/${MAX_ATTEMPTS}"
+
+                                ALB_RESPONSE=$(curl \
+                                    --silent \
+                                    --max-time 10 \
+                                    "${ALB_URL}/" || true)
+
+                                echo "${ALB_RESPONSE}"
+
+                                if echo "${ALB_RESPONSE}" | \
+                                    grep -q "Zero Downtime Kubernetes Demo"; then
+
+                                    echo "Application response is healthy."
+                                    break
+                                fi
+
+                                sleep "${SLEEP_SECONDS}"
+                            done
+
+                            if ! echo "${ALB_RESPONSE}" | \
+                                grep -q "Zero Downtime Kubernetes Demo"; then
+
+                                echo "ERROR: Application verification failed after rollback."
+                                exit 1
+                            fi
+
+                            echo ""
+                            echo "Checking that failed version is no longer served..."
+
+                            if echo "${ALB_RESPONSE}" | \
+                                grep -q "<strong>${IMAGE_TAG}</strong>"; then
+
+                                echo "ERROR: Failed version ${IMAGE_TAG} is still being served."
+                                exit 1
+                            fi
+
+                            echo ""
+                            echo "========================================"
+                            echo "AUTOMATIC ROLLBACK VERIFIED"
+                            echo "========================================"
+
+                            echo "Failed image:    ${IMAGE_NAME}"
+                            echo "Restored image:  ${RESTORED_IMAGE}"
+                            echo "ALB health:      HTTP 200"
+                            echo "Application:     Healthy"
+                            echo "Failed version:  No longer served"
+                        ''',
+                        returnStatus: true
+                    )
+
+                    if (rollbackStatus != 0) {
+                        error("Automatic rollback or rollback verification failed.")
                     }
 
                     echo "Automatic rollback and ALB recovery verification completed."
