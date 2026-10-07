@@ -27,7 +27,7 @@ def health():
 
 @app.route("/ready")
 def ready():
-    return "NOT READY", 503
+    return "READY", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8080)
