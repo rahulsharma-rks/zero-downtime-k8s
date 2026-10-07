@@ -2,6 +2,10 @@ pipeline {
 
     agent any
 
+    options {
+        skipDefaultCheckout(true)
+    }
+
     environment {
         AWS_REGION      = 'ap-south-1'
         AWS_ACCOUNT_ID  = '520701146276'
@@ -38,7 +42,7 @@ pipeline {
                     echo "Testing application"
                     echo "========================================="
 
-                    python3 -m py_compile app.py
+                    python3 -m py_compile app/app.py
 
                     echo "Application syntax check passed."
                 '''
@@ -56,7 +60,8 @@ pipeline {
 
                     docker build \
                         --build-arg APP_VERSION="${IMAGE_TAG}" \
-                        -t "${IMAGE_NAME}" .
+                        -t "${IMAGE_NAME}" \
+                        app/
 
                     echo "Docker image built successfully:"
                     echo "${IMAGE_NAME}"
@@ -129,7 +134,7 @@ pipeline {
                     '''
 
                     /*
-                     * Capture the exact image currently running.
+                     * Capture the exact image currently deployed.
                      * This becomes the rollback target.
                      */
                     def previousImage = sh(
@@ -148,9 +153,10 @@ pipeline {
                     env.PREVIOUS_IMAGE = previousImage
 
                     /*
-                     * Extract the version from the previous image dynamically.
+                     * Dynamically extract the previous version.
+                     *
                      * Example:
-                     * 520701146276.dkr.ecr.ap-south-1.amazonaws.com/zero-downtime-app:7
+                     * .../zero-downtime-app:7
                      * -> 7
                      */
                     def previousVersion = previousImage.tokenize(':').last()
@@ -322,8 +328,8 @@ pipeline {
                             echo "Restored image   : ${previousImage}"
 
                             /*
-                             * Marker file is intentionally used as a durable
-                             * pipeline-state indicator for later stages/post.
+                             * Durable workspace marker.
+                             * Used by later stages and post actions.
                              */
                             touch .rollback_verified
 
@@ -382,11 +388,8 @@ pipeline {
                     echo "========================================="
 
                     /*
-                     * IMPORTANT:
+                     * Kubernetes Deployment state is the source of truth.
                      * Do not rely on ROLLBACK_PERFORMED here.
-                     *
-                     * The actual Kubernetes Deployment state is the
-                     * source of truth.
                      */
                     def deployedImage = sh(
                         script: """
@@ -397,16 +400,14 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "Expected new image : ${env.IMAGE_NAME}"
-                    echo "Previous image     : ${env.PREVIOUS_IMAGE}"
+                    echo "Expected new image   : ${env.IMAGE_NAME}"
+                    echo "Previous image       : ${env.PREVIOUS_IMAGE}"
                     echo "Actual deployed image: ${deployedImage}"
 
                     if (deployedImage == env.IMAGE_NAME) {
 
                         /*
-                         * -------------------------------------------------
                          * NORMAL DEPLOYMENT
-                         * -------------------------------------------------
                          */
                         echo "========================================="
                         echo "STATE: NORMAL DEPLOYMENT"
@@ -458,9 +459,7 @@ pipeline {
                     } else if (deployedImage == env.PREVIOUS_IMAGE) {
 
                         /*
-                         * -------------------------------------------------
                          * ROLLBACK
-                         * -------------------------------------------------
                          */
                         echo "========================================="
                         echo "STATE: ROLLBACK"
@@ -472,7 +471,7 @@ pipeline {
 
                         def restoredVersion = env.PREVIOUS_IMAGE.tokenize(':').last()
 
-                        echo "Restored image : ${env.PREVIOUS_IMAGE}"
+                        echo "Restored image  : ${env.PREVIOUS_IMAGE}"
                         echo "Restored version: ${restoredVersion}"
 
                         sh """
@@ -529,9 +528,7 @@ pipeline {
                     } else {
 
                         /*
-                         * -------------------------------------------------
-                         * UNEXPECTED STATE
-                         * -------------------------------------------------
+                         * UNEXPECTED DEPLOYMENT STATE
                          */
                         error(
                             "Unexpected deployment image. " +
@@ -550,22 +547,25 @@ pipeline {
         success {
             script {
                 if (fileExists('.rollback_verified')) {
+
                     echo "========================================="
                     echo "PIPELINE SUCCESSFUL"
                     echo "========================================="
                     echo "Deployment failed safely and was automatically rolled back."
-                    echo "Previous image restored : ${env.PREVIOUS_IMAGE}"
-                    echo "Previous version        : ${env.PREVIOUS_VERSION}"
                     echo "Failed version          : ${env.IMAGE_TAG}"
-                    echo "ALB verification        : PASSED"
+                    echo "Restored image          : ${env.PREVIOUS_IMAGE}"
+                    echo "Restored version        : ${env.PREVIOUS_VERSION}"
+                    echo "ALB rollback verification: PASSED"
                     echo "========================================="
+
                 } else {
+
                     echo "========================================="
                     echo "PIPELINE SUCCESSFUL"
                     echo "========================================="
                     echo "Normal deployment completed successfully."
-                    echo "Deployed image: ${env.IMAGE_NAME}"
-                    echo "ALB verification: PASSED"
+                    echo "Deployed image          : ${env.IMAGE_NAME}"
+                    echo "ALB verification        : PASSED"
                     echo "========================================="
                 }
             }
@@ -574,15 +574,18 @@ pipeline {
         failure {
             script {
                 if (fileExists('.rollback_verified')) {
+
                     echo "========================================="
                     echo "PIPELINE FAILED AFTER ROLLBACK"
                     echo "========================================="
                     echo "Automatic rollback was successfully verified."
-                    echo "Restored image : ${env.PREVIOUS_IMAGE}"
-                    echo "Restored version: ${env.PREVIOUS_VERSION}"
-                    echo "The failure occurred in a post-rollback verification stage."
+                    echo "Restored image          : ${env.PREVIOUS_IMAGE}"
+                    echo "Restored version        : ${env.PREVIOUS_VERSION}"
+                    echo "Failure occurred after rollback verification."
                     echo "========================================="
+
                 } else {
+
                     echo "========================================="
                     echo "PIPELINE FAILED"
                     echo "========================================="
