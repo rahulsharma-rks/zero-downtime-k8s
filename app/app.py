@@ -16,7 +16,7 @@ def home():
     <body>
         <h1>Zero Downtime Kubernetes Demo</h1>
         <p>Application Version: <strong>{APP_VERSION}</strong></p>
-        <p>Status: <strong>Runnin - Zero Downtime Deploymentg</strong></p>
+        <p>Status: <strong>Running - Zero Downtime Deployment</strong></p>
     </body>
     </html>
     """
