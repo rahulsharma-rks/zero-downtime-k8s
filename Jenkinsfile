@@ -168,7 +168,48 @@ PY
             }
         }
     }
+    stage('ALB Smoke Test') {
+    steps {
+        sh '''
+            set -e
 
+            ALB_URL="http://k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com"
+
+            echo "========================================"
+            echo "ALB Smoke Test"
+            echo "========================================"
+
+            echo "Testing /health..."
+
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                "${ALB_URL}/health")
+
+            echo "Health endpoint HTTP status: ${HTTP_CODE}"
+
+            if [ "${HTTP_CODE}" != "200" ]; then
+                echo "ALB health check failed"
+                exit 1
+            fi
+
+            echo ""
+            echo "Testing application endpoint..."
+
+            RESPONSE=$(curl -fsS "${ALB_URL}/")
+
+            echo "${RESPONSE}"
+
+            echo ""
+            echo "Checking deployed application version..."
+
+            echo "${RESPONSE}" | grep -q "Application Version: ${IMAGE_TAG}"
+
+            echo "Application version ${IMAGE_TAG} verified."
+
+            echo ""
+            echo "ALB smoke test passed."
+        '''
+      }
+   }
     post {
 
         success {
