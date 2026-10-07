@@ -25,22 +25,22 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "Creating Python virtual environment..."
+                    echo "========================================"
+                    echo "Testing Application"
+                    echo "========================================"
 
+                    echo "Creating Python virtual environment..."
                     rm -rf .venv
                     python3 -m venv .venv
 
                     echo "Installing application dependencies..."
-
                     .venv/bin/python -m pip install --upgrade pip
                     .venv/bin/pip install -r app/requirements.txt
 
                     echo "Running Python syntax check..."
-
                     .venv/bin/python -m py_compile app/app.py
 
                     echo "Running application tests..."
-
                     .venv/bin/python - <<'PY'
 from app.app import app
 
@@ -66,7 +66,11 @@ PY
                 sh '''
                     set -e
 
-                    echo "Building Docker image:"
+                    echo "========================================"
+                    echo "Building Docker Image"
+                    echo "========================================"
+
+                    echo "Building image:"
                     echo "${IMAGE_NAME}"
 
                     docker build \
@@ -82,11 +86,13 @@ PY
                 sh '''
                     set -e
 
-                    echo "Logging in to Amazon ECR..."
+                    echo "========================================"
+                    echo "Logging in to Amazon ECR"
+                    echo "========================================"
 
                     aws ecr get-login-password \
-                        --region "${AWS_REGION}" |
-                    docker login \
+                        --region "${AWS_REGION}" \
+                        | docker login \
                         --username AWS \
                         --password-stdin "${ECR_REGISTRY}"
                 '''
@@ -97,6 +103,10 @@ PY
             steps {
                 sh '''
                     set -e
+
+                    echo "========================================"
+                    echo "Pushing Docker Image"
+                    echo "========================================"
 
                     echo "Pushing image:"
                     echo "${IMAGE_NAME}"
@@ -110,6 +120,10 @@ PY
             steps {
                 sh '''
                     set -e
+
+                    echo "========================================"
+                    echo "Deploying to EKS"
+                    echo "========================================"
 
                     echo "Updating kubeconfig..."
 
@@ -144,7 +158,8 @@ PY
                     echo "Deployment Status"
                     echo "========================================"
 
-                    kubectl get deployment "${K8S_DEPLOYMENT}" \
+                    kubectl get deployment \
+                        "${K8S_DEPLOYMENT}" \
                         --namespace "${K8S_NAMESPACE}"
 
                     echo ""
@@ -161,7 +176,8 @@ PY
                     echo "Deployed Image"
                     echo "========================================"
 
-                    kubectl get deployment "${K8S_DEPLOYMENT}" \
+                    kubectl get deployment \
+                        "${K8S_DEPLOYMENT}" \
                         --namespace "${K8S_NAMESPACE}" \
                         -o jsonpath='{.spec.template.spec.containers[0].image}'
 
@@ -201,7 +217,7 @@ PY
                     echo ""
                     echo "Checking deployed application version..."
 
-                    echo "${RESPONSE}" | grep -q "Application Version: ${IMAGE_TAG}"
+                    echo "${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"
 
                     echo "Application version ${IMAGE_TAG} verified."
 
@@ -218,6 +234,7 @@ PY
             echo "========================================"
             echo "CI/CD PIPELINE SUCCESSFUL"
             echo "========================================"
+
             echo "Deployed image: ${IMAGE_NAME}"
         }
 
