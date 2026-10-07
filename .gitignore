@@ -20,3 +20,4 @@ __pycache__/
 # Local / OS files
 .DS_Store
 *.log
+.venv/
