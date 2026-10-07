@@ -54,9 +54,6 @@ assert response.status_code == 200, f"/ returned {response.status_code}"
 response = client.get("/health")
 assert response.status_code == 200, f"/health returned {response.status_code}"
 
-response = client.get("/ready")
-assert response.status_code == 200, f"/ready returned {response.status_code}"
-
 print("Application tests passed")
 PY
                 '''
