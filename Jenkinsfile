@@ -23,6 +23,8 @@ pipeline {
         ALB_URL         = 'http://k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com'
 
         ROLLBACK_PERFORMED = 'false'
+        PREVIOUS_IMAGE     = ''
+        PREVIOUS_VERSION   = ''
     }
 
     stages {
@@ -133,10 +135,6 @@ pipeline {
                         echo "Kubernetes access check successful."
                     '''
 
-                    /*
-                     * Capture the exact image currently deployed.
-                     * This becomes the rollback target.
-                     */
                     def previousImage = sh(
                         script: """
                             kubectl get deployment "${K8S_DEPLOYMENT}" \
@@ -150,16 +148,9 @@ pipeline {
                         error("Unable to determine current deployment image.")
                     }
 
-                    env.PREVIOUS_IMAGE = previousImage
-
-                    /*
-                     * Dynamically extract the previous version.
-                     *
-                     * Example:
-                     * .../zero-downtime-app:7
-                     * -> 7
-                     */
                     def previousVersion = previousImage.tokenize(':').last()
+
+                    env.PREVIOUS_IMAGE = previousImage
                     env.PREVIOUS_VERSION = previousVersion
 
                     echo "========================================="
@@ -171,171 +162,185 @@ pipeline {
                     echo "New version     : ${env.IMAGE_TAG}"
                     echo "========================================="
 
-                    sh """
-                        set -e
-
-                        echo "========================================="
-                        echo "Deploying new image"
-                        echo "========================================="
-
-                        kubectl set image deployment/"${K8S_DEPLOYMENT}" \
-                            "${K8S_CONTAINER}"="${IMAGE_NAME}" \
-                            -n "${K8S_NAMESPACE}"
-
-                        echo "Deployment updated to:"
-                        echo "${IMAGE_NAME}"
-
-                        echo "========================================="
-                        echo "Waiting for rollout"
-                        echo "========================================="
-
-                        set +e
-
-                        kubectl rollout status \
-                            deployment/"${K8S_DEPLOYMENT}" \
-                            -n "${K8S_NAMESPACE}" \
-                            --timeout=5m
-
-                        ROLLOUT_STATUS=\$?
-
-                        set -e
-
-                        if [ "\${ROLLOUT_STATUS}" -eq 0 ]; then
+                    def rolloutStatus = sh(
+                        script: """
+                            set +e
 
                             echo "========================================="
-                            echo "ROLLOUT SUCCESSFUL"
+                            echo "Deploying new image"
                             echo "========================================="
-
-                        else
-
-                            echo "========================================="
-                            echo "ROLLOUT FAILED"
-                            echo "Starting automatic rollback"
-                            echo "========================================="
-
-                            echo "Restoring exact previous image:"
-                            echo "${previousImage}"
 
                             kubectl set image deployment/"${K8S_DEPLOYMENT}" \
-                                "${K8S_CONTAINER}"="${previousImage}" \
+                                "${K8S_CONTAINER}"="${IMAGE_NAME}" \
                                 -n "${K8S_NAMESPACE}"
 
-                            echo "Waiting for rollback rollout..."
+                            echo "Deployment updated to:"
+                            echo "${IMAGE_NAME}"
+
+                            echo "========================================="
+                            echo "Waiting for rollout"
+                            echo "========================================="
 
                             kubectl rollout status \
                                 deployment/"${K8S_DEPLOYMENT}" \
                                 -n "${K8S_NAMESPACE}" \
                                 --timeout=5m
 
-                            echo "Rollback rollout completed successfully."
+                            STATUS=\\$?
 
-                            echo "========================================="
-                            echo "Verifying restored image"
-                            echo "========================================="
+                            exit \\${STATUS}
+                        """,
+                        returnStatus: true
+                    )
 
-                            RESTORED_IMAGE=\$(kubectl get deployment "${K8S_DEPLOYMENT}" \
-                                -n "${K8S_NAMESPACE}" \
-                                -o jsonpath='{.spec.template.spec.containers[0].image}')
+                    if (rolloutStatus == 0) {
 
-                            echo "Expected image: ${previousImage}"
-                            echo "Actual image  : \${RESTORED_IMAGE}"
+                        echo "========================================="
+                        echo "ROLLOUT SUCCESSFUL"
+                        echo "========================================="
 
-                            if [ "\${RESTORED_IMAGE}" != "${previousImage}" ]; then
-                                echo "ERROR: Deployment did not restore the previous image."
-                                exit 1
-                            fi
+                    } else {
 
-                            echo "Restored image verification passed."
+                        echo "========================================="
+                        echo "ROLLOUT FAILED"
+                        echo "Starting automatic rollback"
+                        echo "========================================="
 
-                            echo "========================================="
-                            echo "Verifying ready replicas"
-                            echo "========================================="
+                        def rollbackStatus = sh(
+                            script: """
+                                set -e
 
-                            READY_REPLICAS=\$(kubectl get deployment "${K8S_DEPLOYMENT}" \
-                                -n "${K8S_NAMESPACE}" \
-                                -o jsonpath='{.status.readyReplicas}')
+                                echo "Restoring exact previous image:"
+                                echo "${previousImage}"
 
-                            DESIRED_REPLICAS=\$(kubectl get deployment "${K8S_DEPLOYMENT}" \
-                                -n "${K8S_NAMESPACE}" \
-                                -o jsonpath='{.spec.replicas}')
+                                kubectl set image deployment/"${K8S_DEPLOYMENT}" \
+                                    "${K8S_CONTAINER}"="${previousImage}" \
+                                    -n "${K8S_NAMESPACE}"
 
-                            READY_REPLICAS=\${READY_REPLICAS:-0}
+                                echo "Waiting for rollback rollout..."
 
-                            echo "Ready replicas   : \${READY_REPLICAS}"
-                            echo "Desired replicas : \${DESIRED_REPLICAS}"
+                                kubectl rollout status \
+                                    deployment/"${K8S_DEPLOYMENT}" \
+                                    -n "${K8S_NAMESPACE}" \
+                                    --timeout=5m
 
-                            if [ "\${READY_REPLICAS}" -ne "\${DESIRED_REPLICAS}" ]; then
-                                echo "ERROR: Not all replicas are ready after rollback."
-                                exit 1
-                            fi
+                                echo "Rollback rollout completed successfully."
 
-                            echo "Replica verification passed."
+                                echo "========================================="
+                                echo "Verifying restored image"
+                                echo "========================================="
 
-                            echo "========================================="
-                            echo "Verifying ALB health after rollback"
-                            echo "========================================="
+                                RESTORED_IMAGE=\\$(kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                    -n "${K8S_NAMESPACE}" \
+                                    -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-                            ALB_HEALTH_STATUS=\$(curl \
-                                --silent \
-                                --output /dev/null \
-                                --write-out "%{http_code}" \
-                                --max-time 10 \
-                                "${ALB_URL}/health")
+                                echo "Expected image: ${previousImage}"
+                                echo "Actual image  : \\${RESTORED_IMAGE}"
 
-                            echo "ALB /health HTTP status: \${ALB_HEALTH_STATUS}"
+                                if [ "\\${RESTORED_IMAGE}" != "${previousImage}" ]; then
+                                    echo "ERROR: Deployment did not restore the previous image."
+                                    exit 1
+                                fi
 
-                            if [ "\${ALB_HEALTH_STATUS}" != "200" ]; then
-                                echo "ERROR: ALB health check failed after rollback."
-                                exit 1
-                            fi
+                                echo "Restored image verification passed."
 
-                            echo "ALB health verification passed."
+                                echo "========================================="
+                                echo "Verifying ready replicas"
+                                echo "========================================="
 
-                            echo "========================================="
-                            echo "Verifying restored version through ALB"
-                            echo "========================================="
+                                READY_REPLICAS=\\$(kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                    -n "${K8S_NAMESPACE}" \
+                                    -o jsonpath='{.status.readyReplicas}')
 
-                            RESPONSE=\$(curl \
-                                --silent \
-                                --max-time 10 \
-                                "${ALB_URL}/")
+                                DESIRED_REPLICAS=\\$(kubectl get deployment "${K8S_DEPLOYMENT}" \
+                                    -n "${K8S_NAMESPACE}" \
+                                    -o jsonpath='{.spec.replicas}')
 
-                            echo "ALB application response:"
-                            echo "\${RESPONSE}"
+                                READY_REPLICAS=\\${READY_REPLICAS:-0}
 
-                            RESTORED_VERSION="${previousVersion}"
+                                echo "Ready replicas   : \\${READY_REPLICAS}"
+                                echo "Desired replicas : \\${DESIRED_REPLICAS}"
 
-                            if ! echo "\${RESPONSE}" | grep -q "<strong>\${RESTORED_VERSION}</strong>"; then
-                                echo "ERROR: ALB is not serving the restored version."
-                                echo "Expected restored version: \${RESTORED_VERSION}"
-                                exit 1
-                            fi
+                                if [ "\\${READY_REPLICAS}" -ne "\\${DESIRED_REPLICAS}" ]; then
+                                    echo "ERROR: Not all replicas are ready after rollback."
+                                    exit 1
+                                fi
 
-                            if echo "\${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
-                                echo "ERROR: Failed deployment version ${IMAGE_TAG} is still being served by ALB."
-                                exit 1
-                            fi
+                                echo "Replica verification passed."
 
-                            echo "ALB restored-version verification passed."
-                            echo "Failed version ${IMAGE_TAG} is no longer being served."
+                                echo "========================================="
+                                echo "Verifying ALB health after rollback"
+                                echo "========================================="
 
-                            echo "========================================="
-                            echo "AUTOMATIC ROLLBACK VERIFIED"
-                            echo "========================================="
+                                ALB_HEALTH_STATUS=\\$(curl \
+                                    --silent \
+                                    --output /dev/null \
+                                    --write-out "%{{http_code}}" \
+                                    --max-time 10 \
+                                    "${ALB_URL}/health")
 
-                            echo "Failed version   : ${IMAGE_TAG}"
-                            echo "Restored version : \${RESTORED_VERSION}"
-                            echo "Restored image   : ${previousImage}"
+                                echo "ALB /health HTTP status: \\${ALB_HEALTH_STATUS}"
 
-                            /*
-                             * Durable workspace marker.
-                             * Used by later stages and post actions.
-                             */
-                            touch .rollback_verified
+                                if [ "\\${ALB_HEALTH_STATUS}" != "200" ]; then
+                                    echo "ERROR: ALB health check failed after rollback."
+                                    exit 1
+                                fi
 
-                            exit 0
-                        fi
-                    """
+                                echo "ALB health verification passed."
+
+                                echo "========================================="
+                                echo "Verifying restored version through ALB"
+                                echo "========================================="
+
+                                RESPONSE=\\$(curl \
+                                    --silent \
+                                    --max-time 10 \
+                                    "${ALB_URL}/")
+
+                                echo "ALB application response:"
+                                echo "\\${RESPONSE}"
+
+                                RESTORED_VERSION="${previousVersion}"
+
+                                if ! echo "\\${RESPONSE}" | grep -q "<strong>\\${RESTORED_VERSION}</strong>"; then
+                                    echo "ERROR: ALB is not serving the restored version."
+                                    echo "Expected restored version: \\${RESTORED_VERSION}"
+                                    exit 1
+                                fi
+
+                                if echo "\\${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
+                                    echo "ERROR: Failed deployment version ${IMAGE_TAG} is still being served by ALB."
+                                    exit 1
+                                fi
+
+                                echo "ALB restored-version verification passed."
+                                echo "Failed version ${IMAGE_TAG} is no longer being served."
+
+                                echo "========================================="
+                                echo "AUTOMATIC ROLLBACK VERIFIED"
+                                echo "========================================="
+
+                                echo "Failed version   : ${IMAGE_TAG}"
+                                echo "Restored version : \\${RESTORED_VERSION}"
+                                echo "Restored image   : ${previousImage}"
+                            """,
+                            returnStatus: true
+                        )
+
+                        if (rollbackStatus != 0) {
+                            error("Automatic rollback verification failed.")
+                        }
+
+                        env.ROLLBACK_PERFORMED = 'true'
+
+                        echo "========================================="
+                        echo "AUTOMATIC ROLLBACK COMPLETED"
+                        echo "========================================="
+                        echo "Failed image   : ${env.IMAGE_NAME}"
+                        echo "Restored image : ${env.PREVIOUS_IMAGE}"
+                        echo "Restored version: ${env.PREVIOUS_VERSION}"
+                        echo "========================================="
+                    }
                 }
             }
         }
@@ -353,9 +358,6 @@ pipeline {
                         -n "${K8S_NAMESPACE}" \
                         -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-                    echo "Deployed image:"
-                    echo "${DEPLOYED_IMAGE}"
-
                     READY_REPLICAS=$(kubectl get deployment "${K8S_DEPLOYMENT}" \
                         -n "${K8S_NAMESPACE}" \
                         -o jsonpath='{.status.readyReplicas}')
@@ -366,11 +368,21 @@ pipeline {
 
                     READY_REPLICAS=${READY_REPLICAS:-0}
 
-                    echo "Ready replicas   : ${READY_REPLICAS}"
-                    echo "Desired replicas : ${DESIRED_REPLICAS}"
+                    echo "Deployed image  : ${DEPLOYED_IMAGE}"
+                    echo "Ready replicas  : ${READY_REPLICAS}"
+                    echo "Desired replicas: ${DESIRED_REPLICAS}"
 
                     if [ "${READY_REPLICAS}" -ne "${DESIRED_REPLICAS}" ]; then
                         echo "ERROR: Deployment does not have all replicas ready."
+                        exit 1
+                    fi
+
+                    if [ "${DEPLOYED_IMAGE}" != "${IMAGE_NAME}" ] && \
+                       [ "${DEPLOYED_IMAGE}" != "${PREVIOUS_IMAGE}" ]; then
+                        echo "ERROR: Deployment is in an unexpected state."
+                        echo "Expected: ${IMAGE_NAME}"
+                        echo "     or: ${PREVIOUS_IMAGE}"
+                        echo "Actual:   ${DEPLOYED_IMAGE}"
                         exit 1
                     fi
 
@@ -387,10 +399,6 @@ pipeline {
                     echo "ALB STATE-BASED SMOKE TEST"
                     echo "========================================="
 
-                    /*
-                     * Kubernetes Deployment state is the source of truth.
-                     * Do not rely on ROLLBACK_PERFORMED here.
-                     */
                     def deployedImage = sh(
                         script: """
                             kubectl get deployment "${K8S_DEPLOYMENT}" \
@@ -406,20 +414,12 @@ pipeline {
 
                     if (deployedImage == env.IMAGE_NAME) {
 
-                        /*
-                         * NORMAL DEPLOYMENT
-                         */
                         echo "========================================="
                         echo "STATE: NORMAL DEPLOYMENT"
                         echo "========================================="
 
-                        echo "Deployment image matches IMAGE_NAME."
-                        echo "Expecting new version: ${env.IMAGE_TAG}"
-
                         sh '''
                             set -e
-
-                            echo "Checking ALB /health..."
 
                             ALB_HEALTH_STATUS=$(curl \
                                 --silent \
@@ -434,8 +434,6 @@ pipeline {
                                 echo "ERROR: ALB health check failed."
                                 exit 1
                             fi
-
-                            echo "Checking application version..."
 
                             RESPONSE=$(curl \
                                 --silent \
@@ -458,14 +456,10 @@ pipeline {
 
                     } else if (deployedImage == env.PREVIOUS_IMAGE) {
 
-                        /*
-                         * ROLLBACK
-                         */
                         echo "========================================="
                         echo "STATE: ROLLBACK"
                         echo "========================================="
 
-                        echo "Deployment image does NOT match IMAGE_NAME."
                         echo "Deployment image matches PREVIOUS_IMAGE."
                         echo "Automatic rollback is confirmed."
 
@@ -477,39 +471,35 @@ pipeline {
                         sh """
                             set -e
 
-                            echo "Checking ALB /health after rollback..."
-
-                            ALB_HEALTH_STATUS=\$(curl \
+                            ALB_HEALTH_STATUS=\\$(curl \
                                 --silent \
                                 --output /dev/null \
-                                --write-out "%{http_code}" \
+                                --write-out "%{{http_code}}" \
                                 --max-time 10 \
                                 "${ALB_URL}/health")
 
-                            echo "ALB /health HTTP status: \${ALB_HEALTH_STATUS}"
+                            echo "ALB /health HTTP status: \\${ALB_HEALTH_STATUS}"
 
-                            if [ "\${ALB_HEALTH_STATUS}" != "200" ]; then
+                            if [ "\\${ALB_HEALTH_STATUS}" != "200" ]; then
                                 echo "ERROR: ALB health check failed after rollback."
                                 exit 1
                             fi
 
-                            echo "Checking restored application version..."
-
-                            RESPONSE=\$(curl \
+                            RESPONSE=\\$(curl \
                                 --silent \
                                 --max-time 10 \
                                 "${ALB_URL}/")
 
                             echo "ALB application response:"
-                            echo "\${RESPONSE}"
+                            echo "\\${RESPONSE}"
 
-                            if ! echo "\${RESPONSE}" | grep -q "<strong>${restoredVersion}</strong>"; then
+                            if ! echo "\\${RESPONSE}" | grep -q "<strong>${restoredVersion}</strong>"; then
                                 echo "ERROR: ALB is not serving the restored version."
                                 echo "Expected restored version: ${restoredVersion}"
                                 exit 1
                             fi
 
-                            if echo "\${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
+                            if echo "\\${RESPONSE}" | grep -q "<strong>${IMAGE_TAG}</strong>"; then
                                 echo "ERROR: Failed deployment version ${IMAGE_TAG} is still being served."
                                 exit 1
                             fi
@@ -527,9 +517,6 @@ pipeline {
 
                     } else {
 
-                        /*
-                         * UNEXPECTED DEPLOYMENT STATE
-                         */
                         error(
                             "Unexpected deployment image. " +
                             "Expected either IMAGE_NAME (${env.IMAGE_NAME}) " +
@@ -546,16 +533,18 @@ pipeline {
 
         success {
             script {
-                if (fileExists('.rollback_verified')) {
+
+                if (env.ROLLBACK_PERFORMED == 'true') {
 
                     echo "========================================="
                     echo "PIPELINE SUCCESSFUL"
                     echo "========================================="
-                    echo "Deployment failed safely and was automatically rolled back."
-                    echo "Failed version          : ${env.IMAGE_TAG}"
-                    echo "Restored image          : ${env.PREVIOUS_IMAGE}"
-                    echo "Restored version        : ${env.PREVIOUS_VERSION}"
-                    echo "ALB rollback verification: PASSED"
+                    echo "Deployment failed safely."
+                    echo "Automatic rollback was verified."
+                    echo "Failed image   : ${env.IMAGE_NAME}"
+                    echo "Restored image : ${env.PREVIOUS_IMAGE}"
+                    echo "Restored version: ${env.PREVIOUS_VERSION}"
+                    echo "ALB verification: PASSED"
                     echo "========================================="
 
                 } else {
@@ -564,8 +553,8 @@ pipeline {
                     echo "PIPELINE SUCCESSFUL"
                     echo "========================================="
                     echo "Normal deployment completed successfully."
-                    echo "Deployed image          : ${env.IMAGE_NAME}"
-                    echo "ALB verification        : PASSED"
+                    echo "Deployed image : ${env.IMAGE_NAME}"
+                    echo "ALB verification: PASSED"
                     echo "========================================="
                 }
             }
@@ -573,15 +562,16 @@ pipeline {
 
         failure {
             script {
-                if (fileExists('.rollback_verified')) {
+
+                if (env.ROLLBACK_PERFORMED == 'true') {
 
                     echo "========================================="
                     echo "PIPELINE FAILED AFTER ROLLBACK"
                     echo "========================================="
-                    echo "Automatic rollback was successfully verified."
-                    echo "Restored image          : ${env.PREVIOUS_IMAGE}"
-                    echo "Restored version        : ${env.PREVIOUS_VERSION}"
-                    echo "Failure occurred after rollback verification."
+                    echo "Automatic rollback was successfully completed."
+                    echo "Restored image   : ${env.PREVIOUS_IMAGE}"
+                    echo "Restored version : ${env.PREVIOUS_VERSION}"
+                    echo "Failure occurred after rollback."
                     echo "========================================="
 
                 } else {
@@ -589,7 +579,7 @@ pipeline {
                     echo "========================================="
                     echo "PIPELINE FAILED"
                     echo "========================================="
-                    echo "Automatic rollback was not successfully verified."
+                    echo "Automatic rollback was not successfully completed."
                     echo "========================================="
                 }
             }
@@ -602,9 +592,6 @@ pipeline {
                 echo "========================================="
                 echo "Cleaning up"
                 echo "========================================="
-
-                rm -f .previous_image
-                rm -f .rollback_verified
 
                 docker logout "${ECR_REGISTRY}" >/dev/null 2>&1 || true
 
