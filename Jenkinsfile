@@ -121,9 +121,7 @@ PY
                 script {
 
                     /*
-                     * Step 1:
-                     * Configure kubectl and capture the exact image
-                     * currently running before deployment.
+                     * Capture the exact image currently running.
                      */
 
                     sh '''
@@ -161,7 +159,6 @@ PY
                     '''
 
                     /*
-                     * Step 2:
                      * Deploy the new image.
                      */
 
@@ -185,10 +182,7 @@ PY
                     '''
 
                     /*
-                     * Step 3:
-                     * Wait for the rollout, but don't immediately fail
-                     * the Jenkins stage. We need to handle the failure
-                     * ourselves so that automatic rollback can happen.
+                     * Wait for rollout without immediately aborting.
                      */
 
                     def rolloutStatus = sh(
@@ -208,8 +202,7 @@ PY
                     )
 
                     /*
-                     * Step 4:
-                     * Successful deployment.
+                     * Normal successful deployment.
                      */
 
                     if (rolloutStatus == 0) {
@@ -224,11 +217,7 @@ PY
                     } else {
 
                         /*
-                         * Step 5:
                          * Deployment failed.
-                         *
-                         * Read the exact image captured before deployment
-                         * and restore it.
                          */
 
                         echo "========================================"
@@ -259,8 +248,7 @@ PY
                         }
 
                         /*
-                         * Step 6:
-                         * Restore exact previous image.
+                         * Restore the exact previous image.
                          */
 
                         echo "========================================"
@@ -283,7 +271,6 @@ PY
                         """
 
                         /*
-                         * Step 7:
                          * Wait for rollback rollout.
                          */
 
@@ -313,7 +300,6 @@ PY
                         echo "Rollback rollout completed successfully."
 
                         /*
-                         * Step 8:
                          * Verify exact image restoration.
                          */
 
@@ -347,7 +333,6 @@ PY
                         echo "Rollback image verification passed."
 
                         /*
-                         * Step 9:
                          * Verify ALB recovery.
                          */
 
@@ -440,13 +425,6 @@ PY
                             echo "========================================"
                         '''
 
-                        /*
-                         * Mark rollback as successfully completed.
-                         *
-                         * The later ALB Smoke Test must not expect the
-                         * failed image to be served.
-                         */
-
                         env.ROLLBACK_PERFORMED = 'true'
 
                         echo "========================================"
@@ -483,7 +461,7 @@ PY
 
                     kubectl get deployment "${K8S_DEPLOYMENT}" \
                         -n "${K8S_NAMESPACE}" \
-                        -o jsonpath='{.spec.template.spec.containers[0].image}{"\\n"}'
+                        -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
                 '''
             }
         }
@@ -496,12 +474,6 @@ PY
                     echo "========================================"
                     echo "ALB Smoke Test"
                     echo "========================================"
-
-                    /*
-                     * If automatic rollback already happened, the rollback
-                     * verification has already tested the ALB and confirmed
-                     * the restored version. Do not expect the failed image.
-                     */
 
                     if [ "${ROLLBACK_PERFORMED}" = "true" ]; then
 
@@ -582,31 +554,35 @@ PY
     post {
 
         success {
-            echo "========================================"
-            echo "CI/CD PIPELINE SUCCESSFUL"
-            echo "========================================"
+            script {
+                echo "========================================"
+                echo "CI/CD PIPELINE SUCCESSFUL"
+                echo "========================================"
 
-            if (env.ROLLBACK_PERFORMED == 'true') {
-                echo "Deployment failed but was automatically rolled back."
-                echo "Previous application version has been restored."
-                echo "ALB recovery verification passed."
-                echo "Pipeline completed successfully after rollback."
-            } else {
-                echo "Application image: ${IMAGE_NAME}"
-                echo "Deployment completed successfully."
+                if (env.ROLLBACK_PERFORMED == 'true') {
+                    echo "Deployment failed but was automatically rolled back."
+                    echo "Previous application version has been restored."
+                    echo "ALB recovery verification passed."
+                    echo "Pipeline completed successfully after rollback."
+                } else {
+                    echo "Application image: ${IMAGE_NAME}"
+                    echo "Deployment completed successfully."
+                }
             }
         }
 
         failure {
-            echo "========================================"
-            echo "CI/CD PIPELINE FAILED"
-            echo "========================================"
+            script {
+                echo "========================================"
+                echo "CI/CD PIPELINE FAILED"
+                echo "========================================"
 
-            if (env.ROLLBACK_PERFORMED == 'true') {
-                echo "Rollback was attempted but the pipeline still failed."
-                echo "Manual investigation is required."
-            } else {
-                echo "Pipeline failed before successful deployment recovery."
+                if (env.ROLLBACK_PERFORMED == 'true') {
+                    echo "Rollback was attempted but the pipeline still failed."
+                    echo "Manual investigation is required."
+                } else {
+                    echo "Pipeline failed before successful deployment recovery."
+                }
             }
         }
 
