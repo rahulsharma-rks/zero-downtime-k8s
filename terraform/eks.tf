@@ -12,6 +12,10 @@ module "eks" {
 
   enable_cluster_creator_admin_permissions = true
 
+  tags = {
+    Project = var.project_name
+  }
+
   addons = {
     vpc-cni = {
       most_recent    = true
@@ -32,7 +36,19 @@ module "eks" {
       most_recent    = true
       before_compute = true
     }
+
+    amazon-cloudwatch-observability = {
+      most_recent = true
+
+      pod_identity_association = [
+        {
+          role_arn        = aws_iam_role.cloudwatch_observability.arn
+          service_account = "cloudwatch-agent"
+        }
+      ]
+    }
   }
+
   eks_managed_node_groups = {
     default = {
       name = "zero-downtime-ng"
@@ -40,8 +56,8 @@ module "eks" {
       instance_types = ["t3.small"]
 
       min_size     = 2
-      max_size     = 2
-      desired_size = 2
+      max_size     = 3
+      desired_size = 3
 
       capacity_type = "ON_DEMAND"
 
@@ -51,9 +67,5 @@ module "eks" {
         Project = var.project_name
       }
     }
-  }
-
-  tags = {
-    Project = var.project_name
   }
 }
