@@ -4,6 +4,7 @@ from flask import Flask
 app = Flask(__name__)
 
 APP_VERSION = os.getenv("APP_VERSION", "dev")
+READINESS_FAIL = os.getenv("READINESS_FAIL", "false").lower() == "true"
 
 @app.route("/")
 def home():
@@ -27,6 +28,8 @@ def health():
 
 @app.route("/ready")
 def ready():
+    if READINESS_FAIL:
+        return "NOT READY", 503
     return "READY", 200
 
 if __name__ == "__main__":
