@@ -1,372 +1,377 @@
-# Zero-Downtime Kubernetes Deployment with Jenkins on AWS EKS
+readme = r'''# Zero-Downtime Kubernetes Deployment with Jenkins on AWS EKS
 
-A production-style DevOps project demonstrating how to build, provision, secure, monitor, test, and continuously deploy a containerized application to Amazon EKS using **Terraform, Jenkins, Docker/BuildKit, Amazon ECR, Kubernetes, and AWS Application Load Balancer**.
+A production-style DevOps project demonstrating how to build, deploy, monitor, secure, and automatically roll back a containerized application on Amazon EKS using Jenkins, Terraform, Docker, Amazon ECR, Kubernetes, AWS Load Balancer Controller, Application Load Balancer, Trivy, Amazon CloudWatch, and Amazon SNS.
 
-The primary objective of this project is to implement a realistic Kubernetes deployment pipeline where application releases happen with **zero service interruption**, while failed releases are detected and automatically rolled back.
+The project was built from scratch with an emphasis on Infrastructure as Code, CI/CD automation, zero-downtime rolling deployments, deterministic rollback, Kubernetes production hardening, container security, vulnerability investigation, and operational monitoring.
 
 ---
 
-## 1. Project Overview
+## Table of Contents
 
-The project starts with a simple Flask application and builds a complete AWS-based deployment platform around it.
+1. [Project Overview](#project-overview)
+2. [Problem Statement](#problem-statement)
+3. [Project Goals](#project-goals)
+4. [Final Architecture](#final-architecture)
+5. [Architecture Flow](#architecture-flow)
+6. [Technology Stack](#technology-stack)
+7. [Repository Structure](#repository-structure)
+8. [Project Phases](#project-phases)
+9. [Phase 1 - Infrastructure](#phase-1---infrastructure)
+10. [Phase 2 - Amazon EKS](#phase-2---amazon-eks)
+11. [Phase 3 - Kubernetes Application](#phase-3---kubernetes-application)
+12. [Phase 4 - ALB and Networking](#phase-4---alb-and-networking)
+13. [Phase 5 - Zero-Downtime Rolling Deployment](#phase-5---zero-downtime-rolling-deployment)
+14. [Phase 6 - Jenkins CI/CD](#phase-6---jenkins-cicd)
+15. [Phase 7 - Automated Rollback](#phase-7---automated-rollback)
+16. [Phase 8 - Production Hardening](#phase-8---production-hardening)
+17. [Phase 9 - Failure and Rollback Testing](#phase-9---failure-and-rollback-testing)
+18. [Phase 10 - Security and CI/CD Hardening](#phase-10---security-and-cicd-hardening)
+19. [Jenkins EC2 Setup](#jenkins-ec2-setup)
+20. [Prerequisites](#prerequisites)
+21. [AWS IAM Requirements](#aws-iam-requirements)
+22. [Terraform Configuration](#terraform-configuration)
+23. [Deploy Infrastructure](#deploy-infrastructure)
+24. [Configure kubectl](#configure-kubectl)
+25. [Install / Verify AWS Load Balancer Controller](#install--verify-aws-load-balancer-controller)
+26. [Deploy Kubernetes Application](#deploy-kubernetes-application)
+27. [Configure Jenkins](#configure-jenkins)
+28. [Jenkins Pipeline](#jenkins-pipeline)
+29. [Security Pipeline](#security-pipeline)
+30. [Monitoring and Alerting](#monitoring-and-alerting)
+31. [Useful Kubernetes Commands](#useful-kubernetes-commands)
+32. [Useful AWS Commands](#useful-aws-commands)
+33. [Replication Guide](#replication-guide)
+34. [Terraform Destroy / Environment Cleanup](#terraform-destroy--environment-cleanup)
+35. [Security Considerations](#security-considerations)
+36. [What This Project Demonstrates](#what-this-project-demonstrates)
+37. [Lessons Learned](#lessons-learned)
+38. [Known Limitations](#known-limitations)
+39. [Final Result](#final-result)
+40. [Repository](#repository)
 
-The final workflow is:
+---
+
+# Project Overview
+
+The objective of this project was to build a realistic Kubernetes deployment platform rather than simply deploy a container to EKS.
+
+The final platform provides:
+
+- Infrastructure provisioning using Terraform
+- Amazon VPC with public and private subnets
+- Amazon EKS cluster
+- EKS managed worker nodes
+- Amazon ECR container registry
+- Kubernetes application deployment
+- AWS Load Balancer Controller
+- AWS Application Load Balancer
+- Kubernetes rolling deployment strategy
+- Zero-downtime deployment behavior under normal rolling-update conditions
+- Jenkins-based CI/CD
+- Automated application rollback
+- Kubernetes health checks
+- Pod disruption protection
+- Pod topology spreading
+- Kubernetes security hardening
+- Docker image vulnerability scanning with Trivy
+- Amazon ECR vulnerability scanning
+- Vulnerability investigation and remediation
+- Amazon CloudWatch Container Insights
+- CloudWatch alarms
+- Amazon SNS notifications
+- Infrastructure destruction using Terraform
+
+The project was intentionally developed incrementally through **10 phases**.
+
+---
+
+# Problem Statement
+
+A production deployment should not simply:
+
+```text
+Build Image
+    ↓
+Push Image
+    ↓
+kubectl apply
+```
+
+A production-oriented deployment needs to answer several questions:
+
+- How is infrastructure created?
+- How are containers built?
+- How are images scanned?
+- How does Kubernetes determine whether a new pod is healthy?
+- How can a deployment avoid unnecessarily terminating healthy replicas?
+- What happens if the new version becomes unhealthy?
+- How can the system automatically return to the last known-good version?
+- How are containers hardened?
+- How are vulnerabilities identified and investigated?
+- How are CPU, memory, restarts, and HTTP 5xx errors monitored?
+- How are operators notified?
+- How can the entire environment be recreated or destroyed?
+
+This project was designed to answer those questions with working infrastructure and CI/CD automation.
+
+---
+
+# Project Goals
+
+The primary goals were:
+
+1. Build AWS infrastructure using Terraform.
+2. Create an Amazon EKS cluster.
+3. Deploy a containerized application.
+4. Expose the application through an AWS Application Load Balancer.
+5. Implement Kubernetes rolling deployments.
+6. Configure the deployment for zero-downtime behavior under normal rolling-update conditions.
+7. Build a Jenkins CI/CD pipeline.
+8. Automatically detect deployment failures.
+9. Automatically roll back failed deployments.
+10. Harden the Kubernetes workload.
+11. Scan container images for vulnerabilities.
+12. Integrate Amazon ECR vulnerability scanning.
+13. Investigate and remediate an actual container vulnerability.
+14. Implement CloudWatch monitoring and SNS alerting.
+15. Validate the complete failure and rollback workflow.
+16. Make the infrastructure reproducible and removable with Terraform.
+
+---
+
+# Final Architecture
+
+```text
+                         Internet Users
+                               |
+                               v
+                    +---------------------+
+                    |   AWS ALB           |
+                    | Application Load    |
+                    | Balancer            |
+                    +----------+----------+
+                               |
+                               v
+                         Target Group
+                         Target Type: IP
+                               |
+                               v
+                    +---------------------+
+                    |   EKS Pod IPs       |
+                    |                     |
+                    |  +---------------+  |
+                    |  | Application   |  |
+                    |  | Pod           |  |
+                    |  +---------------+  |
+                    |                     |
+                    |  +---------------+  |
+                    |  | Application   |  |
+                    |  | Pod           |  |
+                    |  +---------------+  |
+                    |                     |
+                    |  +---------------+  |
+                    |  | Application   |  |
+                    |  | Pod           |  |
+                    |  +---------------+  |
+                    +---------------------+
+
+                             ^
+                             |
+                    Kubernetes Ingress
+                             ^
+                             |
+              AWS Load Balancer Controller
+                             ^
+                             |
+                       EKS Cluster
+```
+
+CI/CD path:
 
 ```text
 Developer
     |
-    | git push
     v
 GitHub
     |
-    | Jenkins Pipeline
     v
-Standalone Jenkins EC2
+Jenkins
+(Standalone Ubuntu EC2)
     |
-    +--> Unit Tests
-    |
-    +--> Docker / BuildKit
-    |
-    +--> Trivy Security Scan
-    |
-    +--> Amazon ECR
-    |       |
-    |       +--> ECR Image Scan
-    |
-    +--> kubectl
-            |
-            v
-       Amazon EKS
-            |
-            v
-     Kubernetes Deployment
-            |
-            v
-      Kubernetes Service
-            |
-            v
-       AWS ALB
-            |
-            v
-          Users
+    +--------------------------+
+    |                          |
+    v                          v
+Terraform                  CI/CD Pipeline
+    |                          |
+    v                          v
+AWS Infrastructure       Unit Tests
+                               |
+                               v
+                         Docker BuildKit
+                               |
+                               v
+                             Trivy
+                               |
+                               v
+                              ECR
+                               |
+                               v
+                      ECR Scan Verification
+                               |
+                               v
+                         Kubernetes
+                               |
+                               v
+                       Rolling Deployment
+                               |
+                      +--------+--------+
+                      |                 |
+                   Healthy           Failed
+                      |                 |
+                      v                 v
+                  Continue          Rollback
 ```
 
-The infrastructure itself is provisioned using Terraform.
+---
 
-Therefore, there are two major automation paths:
+# Architecture Flow
 
-### Infrastructure path
+There are two separate flows in the project.
 
-```text
-Terraform
-   |
-   +--> VPC
-   +--> Subnets
-   +--> NAT Gateway
-   +--> EKS
-   +--> Managed Node Group
-   +--> EKS Add-ons
-   +--> IAM
-   +--> CloudWatch
-   +--> SNS
-   +--> ECR
-```
+## Infrastructure Flow
 
-### Application delivery path
+Jenkins can execute Terraform to provision the AWS infrastructure:
 
 ```text
-GitHub
-   |
-   v
 Jenkins
    |
-   +--> Unit Tests
-   +--> BuildKit
-   +--> Trivy
-   +--> ECR
-   +--> ECR Scan
-   +--> Kubernetes Deployment
-   +--> Rollout Verification
-   +--> ALB Health Verification
+   v
+Terraform
    |
-   +--> Automatic Rollback on Failure
+   +---- VPC
+   |
+   +---- Subnets
+   |
+   +---- NAT Gateway
+   |
+   +---- EKS
+   |
+   +---- Node Group
+   |
+   +---- ECR
+   |
+   +---- CloudWatch
+   |
+   +---- SNS
+   |
+   +---- IAM
 ```
 
----
+## Application Traffic Flow
 
-# 2. What Problem Were We Trying to Solve?
-
-A traditional deployment might look like:
+The application traffic path is:
 
 ```text
-Stop old application
-        |
-        v
-Deploy new application
-        |
-        v
-Start new application
+Internet
+   |
+   v
+AWS Application Load Balancer
+   |
+   v
+ALB Target Group
+   |
+   v
+Pod IP
+   |
+   v
+Application Container
 ```
 
-During this process, users can receive:
+Kubernetes `Ingress` does not represent the physical traffic path from the ALB to the application. Instead:
 
 ```text
-HTTP 502
-HTTP 503
-Connection refused
-Timeouts
+Kubernetes Ingress
+        |
+        v
+AWS Load Balancer Controller
+        |
+        v
+AWS ALB / Target Group
 ```
 
-The objective of this project was to eliminate that deployment interruption.
-
-We wanted a deployment system where:
-
-1. A new application version can be released while the old version is still serving traffic.
-2. Kubernetes only sends traffic to healthy pods.
-3. Existing pods are not terminated before replacement pods become ready.
-4. Application failures are detected automatically.
-5. A failed deployment can be rolled back automatically.
-6. The rollback itself is verified.
-7. The external ALB endpoint is tested after deployment.
-8. Container images are security-scanned before deployment.
-9. Infrastructure is reproducible using Terraform.
-10. The entire application deployment is automated through Jenkins.
+The controller watches the Kubernetes resources and configures the corresponding AWS load-balancing resources.
 
 ---
 
-# 3. Final Architecture
+# Technology Stack
 
-```mermaid
-flowchart TB
-
-    DEV["Developer"]
-
-    GH["GitHub Repository"]
-
-    J["Jenkins<br/>Standalone Ubuntu EC2"]
-
-    T["Terraform"]
-
-    AWS["AWS"]
-
-    VPC["VPC<br/>10.20.0.0/16"]
-
-    PUB["Public Subnets<br/>10.20.101.0/24<br/>10.20.102.0/24"]
-
-    PRIV["Private Subnets<br/>10.20.1.0/24<br/>10.20.2.0/24"]
-
-    NAT["NAT Gateway"]
-
-    EKS["Amazon EKS<br/>zero-downtime-eks"]
-
-    NG["Managed Node Group<br/>3 x t3.small"]
-
-    ECR["Amazon ECR<br/>zero-downtime-app"]
-
-    ALB["AWS Application<br/>Load Balancer"]
-
-    K8S["Kubernetes"]
-
-    DEP["Deployment<br/>3 replicas"]
-
-    POD1["Pod"]
-    POD2["Pod"]
-    POD3["Pod"]
-
-    SVC["Kubernetes Service"]
-
-    CW["Amazon CloudWatch<br/>Container Insights"]
-
-    SNS["Amazon SNS<br/>Alerts"]
-
-    USER["Users"]
-
-    DEV -->|git push| GH
-    GH -->|Pipeline| J
-
-    J -->|Terraform| T
-    T --> VPC
-    T --> EKS
-    T --> ECR
-    T --> CW
-    T --> SNS
-
-    VPC --> PUB
-    VPC --> PRIV
-    PUB --> NAT
-    NAT --> PRIV
-
-    EKS --> NG
-    EKS --> K8S
-
-    J -->|docker buildx| ECR
-    J -->|kubectl| K8S
-
-    K8S --> DEP
-    DEP --> POD1
-    DEP --> POD2
-    DEP --> POD3
-
-    K8S --> SVC
-    SVC --> ALB
-
-    ALB --> USER
-
-    POD1 --> CW
-    POD2 --> CW
-    POD3 --> CW
-
-    CW --> SNS
-```
-
----
-
-# 4. AWS Architecture
-
-The project uses:
-
-| Component | Configuration |
+| Component | Technology |
 |---|---|
-| AWS Region | `ap-south-1` |
-| VPC | `10.20.0.0/16` |
-| Public Subnets | `10.20.101.0/24`, `10.20.102.0/24` |
-| Private Subnets | `10.20.1.0/24`, `10.20.2.0/24` |
-| NAT Gateway | 1 |
-| EKS | `zero-downtime-eks` |
-| Kubernetes | 1.36 |
-| Worker Nodes | 3 x `t3.small` |
-| Node Disk | 20 GB |
-| Capacity | ON_DEMAND |
+| Cloud | AWS |
+| Region | `ap-south-1` |
+| Infrastructure as Code | Terraform |
+| Container Runtime | Docker |
+| Container Build | Docker BuildKit / buildx |
 | Container Registry | Amazon ECR |
+| Kubernetes | Amazon EKS |
+| Kubernetes Version | 1.36 |
+| CI/CD | Jenkins |
+| Jenkins Host | Standalone Ubuntu EC2 |
 | Load Balancer | AWS Application Load Balancer |
-| Monitoring | CloudWatch Container Insights |
-| Notifications | Amazon SNS |
+| ALB Integration | AWS Load Balancer Controller |
+| Security Scanner | Trivy |
+| Container Vulnerability Scanner | Amazon ECR |
+| Monitoring | Amazon CloudWatch |
+| Kubernetes Monitoring | CloudWatch Container Insights |
+| Alerting | Amazon SNS |
+| Application | Python Flask |
+| Application Port | 8080 |
 
 ---
 
-# 5. Technology Stack
+# AWS Infrastructure
 
-## Infrastructure
+The environment was built using the following design.
 
-- AWS
-- Terraform
-- Amazon VPC
-- Amazon EKS
-- IAM
-- NAT Gateway
-- Amazon ECR
-- CloudWatch
-- SNS
-
-## CI/CD
-
-- Jenkins
-- GitHub
-- Docker
-- Docker BuildKit / Buildx
-- Trivy
-- AWS CLI
-- kubectl
-
-## Application
-
-- Python 3.12
-- Flask
-- unittest
-
-## Kubernetes
-
-- Deployment
-- Service
-- Ingress
-- PodDisruptionBudget
-- RollingUpdate
-- Readiness Probe
-- Liveness Probe
-- Startup Probe
-- Resource Requests/Limits
-- Security Context
-- Topology Spread Constraints
-
----
-
-# 6. Project Phases
-
-The project was implemented in exactly **10 phases**.
-
----
-
-## Phase 1 — Infrastructure
-
-Terraform was used to create the AWS foundation.
-
-Implemented:
-
-- VPC
-- Public subnets
-- Private subnets
-- Internet Gateway
-- NAT Gateway
-- Routing
-- Availability-zone distribution
-- Resource tagging
-
-The VPC uses:
+## VPC
 
 ```text
+VPC CIDR:
 10.20.0.0/16
 ```
 
-Private subnets:
+## Private Subnets
 
 ```text
 10.20.1.0/24
 10.20.2.0/24
 ```
 
-Public subnets:
+## Public Subnets
 
 ```text
 10.20.101.0/24
 10.20.102.0/24
 ```
 
-Terraform module:
+## NAT Gateway
+
+One NAT Gateway was used for the private subnet egress path.
+
+## EKS
 
 ```text
-terraform-aws-modules/vpc/aws
-```
-
-Version:
-
-```text
-6.7.3
-```
-
----
-
-# Phase 2 — Amazon EKS
-
-An Amazon EKS cluster was created using Terraform.
-
 Cluster:
-
-```text
 zero-downtime-eks
-```
 
 Kubernetes:
-
-```text
 1.36
 ```
 
-The cluster uses private subnets for the worker nodes.
-
-The EKS managed node group uses:
+## Managed Node Group
 
 ```text
-Instance type: t3.small
+Instance Type: t3.small
 Desired:       3
 Minimum:       2
 Maximum:       3
@@ -374,561 +379,16 @@ Disk:          20 GB
 Capacity:      ON_DEMAND
 ```
 
-EKS add-ons include:
-
-- VPC CNI
-- kube-proxy
-- CoreDNS
-- EKS Pod Identity Agent
-- Amazon CloudWatch Observability
-
-Terraform EKS module:
-
-```text
-terraform-aws-modules/eks/aws
-```
-
-Version:
-
-```text
-21.26.0
-```
-
 ---
 
-# Phase 3 — Kubernetes Application
-
-A simple Flask application was containerized and deployed to Kubernetes.
-
-Application endpoints:
-
-```text
-/
- /health
- /ready
-```
-
-`/health` is used for liveness/startup validation.
-
-`/ready` determines whether Kubernetes should send traffic to the pod.
-
-The application exposes version information using:
-
-```text
-APP_VERSION
-```
-
-This allows deployment versions to be easily identified.
-
-Example:
-
-```text
-Application Version: 38
-```
-
----
-
-# Phase 4 — AWS ALB / Networking
-
-The Kubernetes application is exposed externally through an AWS Application Load Balancer.
-
-Traffic flow:
-
-```text
-Internet
-   |
-   v
-AWS ALB
-   |
-   v
-Kubernetes Service
-   |
-   v
-Application Pods
-```
-
-The ALB performs health checks against:
-
-```text
-/health
-```
-
-Expected response:
-
-```text
-HTTP 200
-```
-
-The ALB uses IP targets corresponding to the Kubernetes application pods.
-
----
-
-# Phase 5 — Zero-Downtime Rolling Deployment
-
-This is the core of the project.
-
-The Kubernetes Deployment uses:
-
-```yaml
-strategy:
-  type: RollingUpdate
-  rollingUpdate:
-    maxUnavailable: 0
-    maxSurge: 1
-```
-
-This means Kubernetes must not intentionally reduce the number of available application replicas during an update.
-
-The application runs:
-
-```text
-3 replicas
-```
-
-During an update:
-
-```text
-Old:
-
-Pod A v37
-Pod B v37
-Pod C v37
-```
-
-Kubernetes starts a replacement:
-
-```text
-Pod A v37
-Pod B v37
-Pod C v37
-Pod D v38
-```
-
-Once the new pod becomes ready:
-
-```text
-Pod A v37
-Pod B v37
-Pod C v37
-Pod D v38 READY
-```
-
-Kubernetes can then terminate an old pod.
-
-Eventually:
-
-```text
-Pod D v38
-Pod E v38
-Pod F v38
-```
-
-This prevents the deployment from intentionally dropping below the required available replica count.
-
----
-
-# Phase 6 — Jenkins CI/CD
-
-A dedicated Ubuntu EC2 instance was created for Jenkins.
-
-Jenkins is **not running inside the EKS cluster**.
-
-Architecture:
-
-```text
-Jenkins
-  |
-  +--> Terraform
-  |
-  +--> Docker
-  |
-  +--> AWS CLI
-  |
-  +--> kubectl
-  |
-  +--> Trivy
-  |
-  +--> ECR
-  |
-  +--> EKS
-```
-
-Jenkins performs both:
-
-### Infrastructure operations
-
-```text
-Terraform init
-Terraform validate
-Terraform plan
-Terraform apply
-```
-
-### Application delivery
-
-```text
-Checkout
-   ↓
-Python environment
-   ↓
-Unit tests
-   ↓
-Docker BuildKit
-   ↓
-Trivy
-   ↓
-ECR
-   ↓
-ECR scan
-   ↓
-Kubernetes deployment
-   ↓
-Rollout verification
-   ↓
-ALB validation
-```
-
----
-
-# Phase 7 — Automated Rollback
-
-The pipeline captures the currently deployed image before changing the Deployment.
-
-Example:
-
-```text
-Current version:
-:37
-```
-
-New version:
-
-```text
-:38
-```
-
-If the new deployment fails readiness or rollout validation:
-
-```text
-Deployment :38
-      |
-      X
-      |
-Automatic rollback
-      |
-      v
-Deployment :37
-```
-
-The pipeline then verifies:
-
-1. Kubernetes rollout succeeded.
-2. The expected previous image is restored.
-3. The Deployment has ready replicas.
-4. The ALB health endpoint returns HTTP 200.
-
-The rollback mechanism was deliberately tested using a deployment with:
-
-```text
-READINESS_FAIL=true
-```
-
-The failed release was automatically rolled back to the previous healthy image.
-
----
-
-# Phase 8 — Production Hardening
-
-The Kubernetes workload was hardened using several production-oriented controls.
-
-## Resource management
-
-CPU and memory requests/limits were configured.
-
-Example:
-
-```text
-Requests:
-CPU    100m
-Memory 128Mi
-
-Limits:
-CPU    250m
-Memory 256Mi
-```
-
-## Pod Disruption Budget
-
-```yaml
-minAvailable: 2
-```
-
-This protects availability during voluntary disruptions.
-
-## Topology spread
-
-Pods are distributed across Kubernetes nodes using:
-
-```text
-kubernetes.io/hostname
-```
-
-This reduces the risk of placing all application replicas on the same node.
-
-## Graceful termination
-
-A pre-stop hook is used:
-
-```text
-sleep 10
-```
-
-and:
-
-```text
-terminationGracePeriodSeconds: 30
-```
-
-This gives existing connections time to drain during termination.
-
-## Container security
-
-The application container runs:
-
-```text
-runAsNonRoot: true
-allowPrivilegeEscalation: false
-readOnlyRootFilesystem: true
-capabilities:
-  drop:
-    - ALL
-seccompProfile:
-  type: RuntimeDefault
-```
-
-A writable temporary filesystem is provided through:
-
-```text
-emptyDir
-```
-
-mounted at:
-
-```text
-/tmp
-```
-
----
-
-# Phase 9 — Failure and Rollback Testing
-
-The deployment pipeline was tested under both successful and failed conditions.
-
-Tests included:
-
-### Successful deployment
-
-```text
-Build
- ↓
-Test
- ↓
-Scan
- ↓
-Push
- ↓
-Deploy
- ↓
-Rollout successful
- ↓
-ALB HTTP 200
-```
-
-### Failed readiness
-
-The application was intentionally configured to fail readiness.
-
-Result:
-
-```text
-New deployment
-      ↓
-Readiness failure
-      ↓
-Rollout timeout
-      ↓
-Automatic rollback
-      ↓
-Previous image restored
-      ↓
-ALB HTTP 200
-```
-
-This demonstrated that the rollback mechanism was not merely theoretical.
-
----
-
-# Phase 10 — Security & CI/CD Hardening
-
-The final phase focused on securing and hardening the image build pipeline.
-
-## BuildKit
-
-Docker builds were migrated to Docker Buildx/BuildKit.
-
-The pipeline uses:
-
-```bash
-docker buildx build \
-  --build-arg APP_VERSION="${BUILD_NUMBER}" \
-  --tag "${IMAGE_NAME}" \
-  --provenance=false \
-  --load \
-  app/
-```
-
-`--provenance=false` was used because the generated provenance metadata interfered with the ECR scan workflow used by this project.
-
-## Trivy
-
-Trivy performs a blocking HIGH/CRITICAL vulnerability scan before the image is pushed.
-
-```bash
-trivy image \
-  --scanners vuln \
-  --severity HIGH,CRITICAL \
-  --ignore-unfixed \
-  --exit-code 1 \
-  --no-progress \
-  "${IMAGE_NAME}"
-```
-
-Therefore:
-
-```text
-HIGH/CRITICAL vulnerability
-        |
-        v
-Pipeline FAILS
-        |
-        X
-No deployment
-```
-
-## Amazon ECR scanning
-
-ECR scanning is also enabled and verified by Jenkins.
-
-ECR scanning is treated as a reporting layer, while Trivy remains the blocking CI security gate.
-
-The Jenkins pipeline waits for asynchronous ECR scan results and reports:
-
-```text
-HIGH
-CRITICAL
-Finding
-Package
-Description
-```
-
-## Base-image hardening
-
-During Phase 10, an ECR HIGH vulnerability was investigated.
-
-The vulnerable dependency was associated with the Debian-based Python image.
-
-The production image was migrated to:
-
-```text
-python:3.12-alpine
-```
-
-and the Alpine `zlib` package was explicitly upgraded during the build.
-
-The resulting image passed the blocking Trivy scan with:
-
-```text
-HIGH     : 0
-CRITICAL : 0
-```
-
----
-
-# 7. Final CI/CD Pipeline
-
-The final Jenkins pipeline is approximately:
-
-```text
-┌─────────────────────┐
-│      GitHub         │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│       Checkout      │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ Python Environment   │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│     Unit Tests       │
-└──────────┬──────────┘
-           │ PASS
-           ▼
-┌─────────────────────┐
-│ Docker BuildKit      │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│       Trivy          │
-│ HIGH/CRITICAL Gate   │
-└──────────┬──────────┘
-           │ PASS
-           ▼
-┌─────────────────────┐
-│       ECR Push       │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│    ECR Scan Check    │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ Capture Previous     │
-│ Deployment Image     │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ Kubernetes Deploy    │
-└──────────┬──────────┘
-           │
-           ├─────────────── FAIL ──────────────┐
-           │                                   │
-           ▼                                   ▼
-┌─────────────────────┐              ┌──────────────────┐
-│ Rollout Verification│              │ Automatic        │
-└──────────┬──────────┘              │ Rollback         │
-           │                         └────────┬─────────┘
-           │ PASS                             │
-           ▼                                  ▼
-┌─────────────────────┐              ┌──────────────────┐
-│ ALB /health Check   │              │ Verify Previous  │
-└──────────┬──────────┘              │ Version + ALB    │
-           │                         └──────────────────┘
-           ▼
-┌─────────────────────┐
-│ Deployment SUCCESS   │
-└─────────────────────┘
-```
-
----
-
-# 8. Repository Structure
+# Repository Structure
 
 ```text
 zero-downtime-k8s/
+│
+├── .gitignore
+├── Jenkinsfile
+├── iam_policy.json
 │
 ├── app/
 │   ├── Dockerfile
@@ -942,495 +402,785 @@ zero-downtime-k8s/
 │   ├── pdb.yaml
 │   └── service.yaml
 │
-├── terraform/
-│   ├── ecr.tf
-│   ├── eks.tf
-│   ├── outputs.tf
-│   ├── variables.tf
-│   ├── versions.tf
-│   ├── vpc.tf
-│   ├── cloudwatch_alarms.tf
-│   ├── cloudwatch_iam.tf
-│   ├── cloudwatch_logs.tf
-│   └── cloudwatch_notifications.tf
-│
-├── Jenkinsfile
-├── iam_policy.json
-├── .gitignore
-└── README.md
+└── terraform/
+    ├── .terraform.lock.hcl
+    ├── ecr.tf
+    ├── eks.tf
+    ├── outputs.tf
+    ├── variables.tf
+    ├── versions.tf
+    ├── vpc.tf
+    ├── cloudwatch_iam.tf
+    ├── cloudwatch_logs.tf
+    ├── cloudwatch_alarms.tf
+    └── cloudwatch_notifications.tf
 ```
 
 ---
 
-# 9. Prerequisites
+# Project Phases
 
-The following are required.
+The project consists of exactly **10 phases**.
 
-## AWS
+```text
+Phase 1  - Infrastructure
+Phase 2  - Amazon EKS
+Phase 3  - Kubernetes Application
+Phase 4  - ALB / Networking
+Phase 5  - Zero-Downtime Rolling Deployment
+Phase 6  - Jenkins CI/CD
+Phase 7  - Automated Rollback
+Phase 8  - Production Hardening
+Phase 9  - Failure / Rollback Testing
+Phase 10 - Security & CI/CD Hardening
+```
 
-An AWS account with permissions to create:
+---
+
+# Phase 1 - Infrastructure
+
+Terraform was used to create the AWS foundation.
+
+The infrastructure included:
 
 - VPC
-- EC2
-- EKS
-- IAM
-- ECR
-- ALB
-- CloudWatch
-- SNS
+- Public subnets
+- Private subnets
+- Internet Gateway
 - NAT Gateway
+- Routing
+- ECR
+- IAM resources
+- EKS prerequisites
 
-The project was implemented in:
+Terraform modules used:
 
 ```text
-ap-south-1
+terraform-aws-modules/vpc/aws
+terraform-aws-modules/eks/aws
+```
+
+The project used:
+
+```text
+Terraform: 1.16.5
+AWS Provider: 6.67.0
+VPC Module: 6.7.3
+EKS Module: 21.26.0
 ```
 
 ---
 
-# 10. Required Local Tools
+# Phase 2 - Amazon EKS
 
-Install:
+An Amazon EKS cluster was created:
 
 ```text
-Git
-AWS CLI v2
-Terraform
-kubectl
-Docker
-Docker Buildx
-Python 3
+zero-downtime-eks
 ```
 
-For the Jenkins EC2, additionally install:
+The cluster uses:
+
+- Kubernetes 1.36
+- EKS managed node group
+- Three worker nodes
+- EKS add-ons
+- VPC networking
+- CloudWatch observability
+
+Configured EKS add-ons include:
 
 ```text
-Jenkins
+coredns
+kube-proxy
+vpc-cni
+eks-pod-identity-agent
+amazon-cloudwatch-observability
+```
+
+The final node-group configuration was:
+
+```text
+min_size     = 2
+max_size     = 3
+desired_size = 3
+```
+
+---
+
+# Phase 3 - Kubernetes Application
+
+A simple Flask application was created specifically for demonstrating deployment behavior.
+
+The application exposes:
+
+```text
+/
+```
+
+```text
+/health
+```
+
+```text
+/ready
+```
+
+Example:
+
+```python
+@app.route("/health")
+def health():
+    return "OK", 200
+```
+
+Readiness can intentionally be failed using:
+
+```text
+READINESS_FAIL=true
+```
+
+This capability was added specifically to test Kubernetes deployment failure and automated rollback.
+
+---
+
+# Phase 4 - ALB / Networking
+
+The application is exposed using Kubernetes `Ingress`.
+
+The AWS Load Balancer Controller watches the Kubernetes Ingress and creates/manages the corresponding AWS Application Load Balancer.
+
+The ALB uses:
+
+```text
+Target Type: IP
+Health Check: /health
+Success Code: 200
+```
+
+The resulting architecture is:
+
+```text
+Internet
+    |
+    v
+AWS ALB
+    |
+    v
+Target Group
+    |
+    v
+Pod IPs
+```
+
+The application health endpoint is:
+
+```text
+/health
+```
+
+A successful request returns:
+
+```text
+HTTP 200
+OK
+```
+
+---
+
+# Phase 5 - Zero-Downtime Rolling Deployment
+
+The Kubernetes Deployment uses:
+
+```yaml
+replicas: 3
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+```
+
+This means Kubernetes attempts to maintain all three existing replicas available while introducing the new version.
+
+During a normal update:
+
+```text
+Version N
+Pod 1
+Pod 2
+Pod 3
+```
+
+A new pod is created:
+
+```text
+Version N
+Pod 1
+Pod 2
+Pod 3
+
+Version N+1
+Pod 4
+```
+
+Once the new pod becomes Ready, Kubernetes can terminate an old pod.
+
+The process continues until all replicas run the new version.
+
+The important settings are:
+
+```text
+maxUnavailable = 0
+maxSurge       = 1
+replicas       = 3
+```
+
+This is a **zero-downtime deployment strategy under normal rolling-update conditions**. It should not be interpreted as an absolute guarantee against every possible infrastructure, networking, application, or dependency failure.
+
+---
+
+# Phase 6 - Jenkins CI/CD
+
+Jenkins runs on a **standalone Ubuntu EC2 instance**.
+
+Jenkins is intentionally outside the EKS cluster.
+
+The Jenkins server performs two major functions.
+
+## Infrastructure
+
+```text
+Terraform
+```
+
+for creating and destroying AWS infrastructure.
+
+## CI/CD
+
+```text
+Git checkout
+      ↓
+Python environment
+      ↓
+Unit tests
+      ↓
+Docker BuildKit
+      ↓
+Trivy scan
+      ↓
+ECR login
+      ↓
+Push image
+      ↓
+ECR scan verification
+      ↓
+Kubernetes deployment
+      ↓
+Rollout verification
+      ↓
+ALB smoke test
+```
+
+---
+
+# Phase 7 - Automated Rollback
+
+The pipeline was designed to automatically restore the previous known-good image if a deployment fails.
+
+Before deployment, Jenkins captures the currently running image.
+
+Conceptually:
+
+```text
+Current Version
+      |
+      v
+Capture Image
+      |
+      v
+Deploy New Version
+      |
+      v
+Wait for Rollout
+      |
+   +--+--+
+   |     |
+ PASS   FAIL
+   |     |
+   |     v
+   |   Rollback
+   |     |
+   |     v
+   | Previous Version
+   |
+   v
+ALB Validation
+```
+
+Rollback uses the Kubernetes container name:
+
+```text
+app
+```
+
+For example:
+
+```bash
+kubectl set image deployment/zero-downtime-app \
+  app="${ECR_REGISTRY}/${ECR_REPOSITORY}:${PREVIOUS_TAG}" \
+  -n zero-downtime
+```
+
+The rollback is then verified using:
+
+```bash
+kubectl rollout status
+```
+
+followed by:
+
+```bash
+kubectl get deployment
+```
+
+and an external ALB health check.
+
+---
+
+# Phase 8 - Production Hardening
+
+Several Kubernetes production-hardening features were added.
+
+## Resource Requests and Limits
+
+```yaml
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+```
+
+## Readiness Probe
+
+```text
+/ready
+```
+
+The pod receives traffic only when the readiness probe succeeds.
+
+## Liveness Probe
+
+```text
+/health
+```
+
+The liveness probe helps Kubernetes identify an unhealthy container.
+
+## Startup Probe
+
+The application also has a startup probe to allow sufficient startup time before liveness enforcement becomes relevant.
+
+## Pod Disruption Budget
+
+```yaml
+minAvailable: 2
+```
+
+With three replicas, the application attempts to maintain at least two available replicas during voluntary disruptions.
+
+## Pod Topology Spread
+
+Pods are spread across Kubernetes worker nodes using:
+
+```text
+kubernetes.io/hostname
+```
+
+This reduces the risk of concentrating all application replicas on one worker.
+
+## Graceful Termination
+
+The deployment uses:
+
+```text
+terminationGracePeriodSeconds: 30
+```
+
+and a pre-stop hook:
+
+```text
+sleep 10
+```
+
+This gives the pod time to drain before termination.
+
+## Container Security Context
+
+The application runs as a non-root user.
+
+Configured controls include:
+
+```text
+runAsNonRoot: true
+runAsUser: 1000
+runAsGroup: 1000
+fsGroup: 1000
+seccompProfile: RuntimeDefault
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities:
+  drop:
+    - ALL
+```
+
+A writable `emptyDir` volume is mounted at:
+
+```text
+/tmp
+```
+
+because the application filesystem is read-only.
+
+---
+
+# Phase 9 - Failure / Rollback Testing
+
+The deployment system was deliberately tested under failure conditions.
+
+The application supports:
+
+```text
+READINESS_FAIL=true
+```
+
+This causes:
+
+```text
+/ready
+```
+
+to return:
+
+```text
+HTTP 503
+```
+
+The deployment therefore cannot become Ready.
+
+Kubernetes eventually reports the rollout as failed.
+
+Jenkins detects this condition and executes the rollback logic.
+
+The rollback was tested successfully.
+
+The test demonstrated:
+
+```text
+New version
+     ↓
+Readiness failure
+     ↓
+Rollout failure
+     ↓
+Automatic rollback
+     ↓
+Previous image restored
+     ↓
+Deployment healthy
+     ↓
+ALB health check successful
+```
+
+---
+
+# Phase 10 - Security & CI/CD Hardening
+
+Phase 10 was the final phase.
+
+It contained three major subphases.
+
+## Phase 10.1 - BuildKit + ECR Scan Integration
+
+Docker BuildKit was integrated into the Jenkins pipeline.
+
+The image build uses:
+
+```bash
+docker buildx build \
+  --build-arg APP_VERSION="${BUILD_NUMBER}" \
+  --tag "${IMAGE_NAME}" \
+  --provenance=false \
+  --load \
+  app/
+```
+
+The image is then scanned with Trivy.
+
+## Phase 10.2 - ECR Vulnerability Reporting
+
+Amazon ECR image scanning was integrated into the Jenkins pipeline.
+
+ECR scanning is asynchronous, so Jenkins does not immediately assume that scan results are available.
+
+The pipeline polls ECR for scan results.
+
+The pipeline reports:
+
+```text
+HIGH
+CRITICAL
+```
+
+findings.
+
+The current policy is:
+
+```text
+Trivy       = blocking security gate
+ECR scan    = report-only
+```
+
+Therefore:
+
+- Trivy HIGH/CRITICAL findings block the build.
+- ECR findings are reported for additional visibility.
+- ECR scan availability itself is verified before continuing.
+
+## Phase 10.3 - Vulnerability Investigation and Base Image Hardening
+
+During testing, ECR reported a HIGH vulnerability:
+
+```text
+CVE-2026-85091
+```
+
+The finding was associated with the zlib package in the Debian-based Python image.
+
+The investigation identified the affected package in:
+
+```text
+python:3.12-slim
+```
+
+An Alpine-based image was evaluated:
+
+```text
+python:3.12-alpine
+```
+
+The Alpine zlib package was upgraded:
+
+```bash
+apk update
+apk upgrade zlib
+```
+
+The final Dockerfile contains:
+
+```dockerfile
+RUN apk update && \
+    apk upgrade zlib && \
+    rm -rf /var/cache/apk/*
+```
+
+The hardened image was then validated using:
+
+```text
+Unit tests
+Trivy
+Container execution
+Health endpoint
+Readiness endpoint
+Non-root execution
+Read-only filesystem
+```
+
+The resulting image had:
+
+```text
+HIGH     = 0
+CRITICAL = 0
+```
+
+This phase demonstrated the complete vulnerability lifecycle:
+
+```text
+Detect
+  ↓
+Investigate
+  ↓
+Identify affected dependency
+  ↓
+Evaluate alternative base image
+  ↓
+Patch dependency
+  ↓
+Rebuild
+  ↓
+Rescan
+  ↓
+Deploy
+```
+
+---
+
+# Final Dockerfile
+
+The production Dockerfile is:
+
+```dockerfile
+FROM python:3.12-alpine
+
+ARG APP_VERSION=dev
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV APP_VERSION=${APP_VERSION}
+
+RUN apk update && \
+    apk upgrade zlib && \
+    rm -rf /var/cache/apk/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+RUN addgroup -S appgroup && \
+    adduser -S -D -H -s /sbin/nologin -G appgroup appuser
+
+USER appuser
+
+EXPOSE 8080
+
+CMD ["python", "app.py"]
+```
+
+The final application image does not include the unit-test source file.
+
+---
+
+# Jenkins EC2 Setup
+
+Jenkins runs on a separate Ubuntu EC2 instance.
+
+Architecture:
+
+```text
+Ubuntu EC2
+     |
+     +---- Jenkins
+     |
+     +---- Git
+     |
+     +---- Docker
+     |
+     +---- AWS CLI
+     |
+     +---- kubectl
+     |
+     +---- Terraform
+     |
+     +---- Trivy
+     |
+     +---- Python
+```
+
+Jenkins is **not deployed inside EKS**.
+
+This separation allows Jenkins to act as an external CI/CD control plane.
+
+---
+
+# Prerequisites
+
+The Jenkins EC2 instance should have the following tools available.
+
+| Tool | Purpose |
+|---|---|
+| Git | Source checkout |
+| Jenkins | CI/CD |
+| AWS CLI | AWS operations |
+| Terraform | Infrastructure provisioning |
+| kubectl | Kubernetes operations |
+| Docker | Container build |
+| Docker Buildx | BuildKit |
+| Trivy | Image security scanning |
+| Python 3 | Unit tests and reporting |
+| pip / venv | Python dependencies |
+
+The versions used during development included:
+
+```text
+Terraform       1.16.5
+AWS Provider    6.67.0
+Kubernetes      1.36
+Python 3.x
+Docker BuildKit
 Trivy
 ```
 
 ---
 
-# 11. Ubuntu Jenkins EC2 Setup
+# AWS IAM Requirements
 
-Jenkins runs on a **standalone Ubuntu EC2 instance**.
-
-The EC2 instance acts as the CI/CD controller/worker used by the project.
-
-Recommended architecture:
+The recommended authentication model is:
 
 ```text
-Internet
-   |
-   v
-Jenkins Ubuntu EC2
-   |
-   +--> GitHub
-   +--> AWS
-   +--> Docker
-   +--> Terraform
-   +--> kubectl
-   +--> ECR
-   +--> EKS
+Jenkins EC2
+     |
+     v
+EC2 Instance Profile / IAM Role
+     |
+     v
+AWS APIs
 ```
 
-Do not run Jenkins inside the application EKS cluster for this implementation.
+Avoid storing long-lived AWS access keys inside Jenkins whenever possible.
 
----
+The Jenkins EC2 instance requires permissions appropriate for the actions it performs, including:
 
-# 12. Install Base Packages on Jenkins EC2
+- EKS
+- ECR
+- CloudWatch
+- AWS Load Balancer-related operations where applicable
+- Terraform-managed infrastructure
+- STS identity operations
 
-```bash
-sudo apt update
+Kubernetes access is separate from general AWS API authorization and must also be configured through EKS access/RBAC.
 
-sudo apt install -y \
-  git \
-  curl \
-  unzip \
-  wget \
-  jq \
-  python3 \
-  python3-venv \
-  python3-pip \
-  ca-certificates \
-  gnupg \
-  lsb-release
-```
-
-Verify:
-
-```bash
-git --version
-python3 --version
-curl --version
-```
-
----
-
-# 13. Install Java
-
-Jenkins requires Java.
-
-Install Java 17:
-
-```bash
-sudo apt update
-
-sudo apt install -y openjdk-17-jdk
-```
-
-Verify:
-
-```bash
-java -version
-```
-
----
-
-# 14. Install Jenkins
-
-Add the Jenkins repository:
-
-```bash
-sudo wget -O /etc/apt/keyrings/jenkins-keyring.asc \
-  https://pkg.jenkins.io/debian-stable/jenkins.io-2026.key
-
-echo "deb [signed-by=/etc/apt/keyrings/jenkins-keyring.asc] \
-https://pkg.jenkins.io/debian-stable binary/" \
-| sudo tee /etc/apt/sources.list.d/jenkins.list > /dev/null
-```
-
-Install:
-
-```bash
-sudo apt update
-sudo apt install -y jenkins
-```
-
-Enable Jenkins:
-
-```bash
-sudo systemctl enable jenkins
-sudo systemctl start jenkins
-```
-
-Check:
-
-```bash
-sudo systemctl status jenkins
-```
-
-Retrieve the initial password:
-
-```bash
-sudo cat /var/lib/jenkins/secrets/initialAdminPassword
-```
-
-Access:
+The repository contains:
 
 ```text
-http://<JENKINS_EC2_PUBLIC_IP>:8080
+iam_policy.json
 ```
 
-Restrict port `8080` in the EC2 security group rather than exposing Jenkins broadly to the internet.
+for project IAM configuration.
+
+Review and scope IAM permissions according to your own AWS environment before using them in production.
 
 ---
 
-# 15. Install Docker
+# Terraform Configuration
 
-Install Docker using the official Docker repository.
-
-```bash
-sudo apt update
-
-sudo apt install -y \
-  ca-certificates \
-  curl \
-  gnupg
-```
-
-```bash
-sudo install -m 0755 -d /etc/apt/keyrings
-
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-```
-
-```bash
-echo \
-  "deb [arch=$(dpkg --print-architecture) \
-  signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-```
-
-Install:
-
-```bash
-sudo apt update
-
-sudo apt install -y \
-  docker-ce \
-  docker-ce-cli \
-  containerd.io \
-  docker-buildx-plugin \
-  docker-compose-plugin
-```
-
-Enable Docker:
-
-```bash
-sudo systemctl enable docker
-sudo systemctl start docker
-```
-
-Allow Jenkins to use Docker:
-
-```bash
-sudo usermod -aG docker jenkins
-```
-
-Restart Jenkins:
-
-```bash
-sudo systemctl restart jenkins
-```
-
-Verify:
-
-```bash
-docker --version
-docker buildx version
-```
-
----
-
-# 16. Install AWS CLI v2
-
-```bash
-cd /tmp
-
-curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
-  -o "awscliv2.zip"
-
-unzip -q awscliv2.zip
-
-sudo ./aws/install
-```
-
-Verify:
-
-```bash
-aws --version
-```
-
----
-
-# 17. Install Terraform
-
-The project was built with Terraform:
-
-```text
-1.16.5
-```
-
-Install the required Terraform version:
-
-```bash
-wget https://releases.hashicorp.com/terraform/1.16.5/terraform_1.16.5_linux_amd64.zip \
-  -O /tmp/terraform.zip
-
-unzip -o /tmp/terraform.zip -d /tmp/terraform
-
-sudo install /tmp/terraform/terraform /usr/local/bin/terraform
-```
-
-Verify:
-
-```bash
-terraform version
-```
-
----
-
-# 18. Install kubectl
-
-Install the Kubernetes CLI appropriate for the EKS version being used.
-
-Example:
-
-```bash
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-
-sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-```
-
-Verify:
-
-```bash
-kubectl version --client
-```
-
----
-
-# 19. Install Trivy
-
-```bash
-sudo apt-get install -y wget gnupg
-
-wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key \
-  | gpg --dearmor \
-  | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
-```
-
-```bash
-echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] \
-https://aquasecurity.github.io/trivy-repo/deb \
-generic main" \
-| sudo tee /etc/apt/sources.list.d/trivy.list
-```
-
-```bash
-sudo apt update
-sudo apt install -y trivy
-```
-
-Verify:
-
-```bash
-trivy --version
-```
-
----
-
-# 20. Verify Jenkins Toolchain
-
-Run:
-
-```bash
-sudo -u jenkins git --version
-sudo -u jenkins python3 --version
-sudo -u jenkins aws --version
-sudo -u jenkins terraform version
-sudo -u jenkins kubectl version --client
-sudo -u jenkins docker --version
-sudo -u jenkins docker buildx version
-sudo -u jenkins trivy --version
-```
-
-All tools must be accessible to the Jenkins user.
-
----
-
-# 21. Jenkins EC2 IAM Permissions
-
-The Jenkins EC2 should use an **IAM instance profile/role** instead of storing long-lived AWS access keys on the server.
-
-The Jenkins role needs permissions appropriate for:
-
-### ECR
-
-```text
-Authenticate
-Push images
-Describe images
-Describe scan findings
-```
-
-### EKS
-
-```text
-DescribeCluster
-```
-
-and appropriate Kubernetes access must be granted to the Jenkins IAM principal.
-
-### Terraform
-
-Terraform also needs permissions required to create/update the AWS resources defined in:
-
-```text
-terraform/
-```
-
-Do not place:
-
-```text
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-```
-
-directly in the repository.
-
----
-
-# 22. Clone the Repository
-
-On the Jenkins EC2:
-
-```bash
-cd /home/ubuntu
-
-git clone https://github.com/rahulsharma-rks/zero-downtime-k8s.git
-
-cd zero-downtime-k8s
-```
-
-Verify:
-
-```bash
-git branch
-git log -1 --oneline
-```
-
----
-
-# 23. Configure AWS
-
-If using an EC2 instance profile:
-
-```bash
-aws sts get-caller-identity
-```
-
-Expected output should identify the Jenkins EC2 IAM role/account.
-
-Verify the region:
-
-```bash
-aws configure get region
-```
-
-Set the project region if required:
-
-```bash
-export AWS_REGION=ap-south-1
-export AWS_DEFAULT_REGION=ap-south-1
-```
-
----
-
-# 24. Provision Infrastructure Using Terraform
-
-Move into Terraform:
+Move into the Terraform directory:
 
 ```bash
 cd /home/ubuntu/zero-downtime-k8s/terraform
 ```
 
-Initialize:
+Initialize Terraform:
 
 ```bash
 terraform init
-```
-
-Format:
-
-```bash
-terraform fmt
 ```
 
 Validate:
@@ -1439,25 +1189,23 @@ Validate:
 terraform validate
 ```
 
+Format:
+
+```bash
+terraform fmt -recursive
+```
+
 Create a plan:
 
 ```bash
 terraform plan
 ```
 
-Apply:
-
-```bash
-terraform apply
-```
-
-Review the plan carefully before confirming.
-
 ---
 
-# 25. Configure the CloudWatch Alert Email
+# Terraform Variables
 
-The Terraform configuration contains:
+The project includes an email variable for CloudWatch notifications:
 
 ```hcl
 variable "alert_email" {
@@ -1467,37 +1215,110 @@ variable "alert_email" {
 }
 ```
 
-Create a local `terraform.tfvars`:
-
-```bash
-cat > terraform.tfvars <<'EOF'
-aws_region  = "ap-south-1"
-project_name = "zero-downtime"
-cluster_name = "zero-downtime-eks"
-
-alert_email = "YOUR_EMAIL@example.com"
-EOF
-```
-
-Replace:
+Create a local:
 
 ```text
-YOUR_EMAIL@example.com
+terraform.tfvars
 ```
 
-with the desired notification address.
+For example:
 
-**Do not commit `terraform.tfvars` if it contains environment-specific values.**
+```hcl
+project_name = "zero-downtime"
+cluster_name = "zero-downtime-eks"
+aws_region   = "ap-south-1"
 
-After Terraform creates the SNS subscription, AWS sends a confirmation email.
+alert_email = "your-email@example.com"
+```
 
-The email subscription must be confirmed before SNS notifications are delivered.
+Do **not** commit this file if it contains your personal email address or other environment-specific secrets.
 
 ---
 
-# 26. Configure kubectl for EKS
+# Deploy Infrastructure
 
-After the cluster is created:
+From:
+
+```bash
+cd /home/ubuntu/zero-downtime-k8s/terraform
+```
+
+Run:
+
+```bash
+terraform init
+```
+
+Then:
+
+```bash
+terraform validate
+```
+
+Then:
+
+```bash
+terraform plan
+```
+
+If the plan is correct:
+
+```bash
+terraform apply
+```
+
+Confirm with:
+
+```text
+yes
+```
+
+---
+
+# Configure AWS CLI
+
+Set the AWS region:
+
+```bash
+export AWS_REGION=ap-south-1
+```
+
+Verify the AWS identity:
+
+```bash
+aws sts get-caller-identity
+```
+
+Retrieve the AWS account ID dynamically:
+
+```bash
+export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+```
+
+Set the ECR repository:
+
+```bash
+export ECR_REPOSITORY=zero-downtime-app
+```
+
+Set the registry:
+
+```bash
+export ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+```
+
+Verify:
+
+```bash
+echo "${AWS_ACCOUNT_ID}"
+echo "${ECR_REGISTRY}"
+```
+
+---
+
+# Configure kubectl
+
+Update kubeconfig:
 
 ```bash
 aws eks update-kubeconfig \
@@ -1511,141 +1332,97 @@ Verify:
 kubectl get nodes
 ```
 
-Expected:
+---
 
-```text
-3 nodes
-```
+# Install / Verify AWS Load Balancer Controller
 
-Check:
+The AWS Load Balancer Controller is required for the Kubernetes Ingress to create/manage the AWS Application Load Balancer.
+
+The controller must be installed and granted the appropriate IAM permissions.
+
+Verify that it is running:
 
 ```bash
-kubectl get nodes -o wide
+kubectl get pods -n kube-system | grep aws-load-balancer-controller
 ```
+
+For a new environment, follow the AWS EKS Load Balancer Controller installation procedure appropriate to your EKS version and IAM model.
+
+The controller installation is not represented as a dedicated Terraform module in this repository, so its exact IAM/Helm configuration may need to be recreated separately when building the project in another AWS account.
 
 ---
 
-# 27. Verify EKS Add-ons
-
-```bash
-aws eks list-addons \
-  --cluster-name zero-downtime-eks \
-  --region ap-south-1
-```
-
-Expected add-ons include:
-
-```text
-vpc-cni
-kube-proxy
-coredns
-eks-pod-identity-agent
-amazon-cloudwatch-observability
-```
-
----
-
-# 28. Deploy Kubernetes Resources Manually
-
-The Jenkins pipeline normally handles application deployment, but the manifests can also be applied manually.
+# Deploy Kubernetes Application
 
 Create the namespace:
 
 ```bash
-kubectl create namespace zero-downtime \
-  --dry-run=client \
-  -o yaml | kubectl apply -f -
+kubectl create namespace zero-downtime
 ```
 
-Apply the application resources:
+Apply the service:
 
 ```bash
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/pdb.yaml
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/ingress.yaml
+kubectl apply \
+  -f k8s/service.yaml \
+  -n zero-downtime
+```
+
+Apply the deployment:
+
+```bash
+kubectl apply \
+  -f k8s/deployment.yaml \
+  -n zero-downtime
+```
+
+Apply the PodDisruptionBudget:
+
+```bash
+kubectl apply \
+  -f k8s/pdb.yaml \
+  -n zero-downtime
+```
+
+Apply the Ingress:
+
+```bash
+kubectl apply \
+  -f k8s/ingress.yaml \
+  -n zero-downtime
 ```
 
 Check:
-
-```bash
-kubectl get all -n zero-downtime
-```
-
----
-
-# 29. Check Deployment
-
-```bash
-kubectl get deployment \
-  zero-downtime-app \
-  -n zero-downtime
-```
-
-Check pods:
-
-```bash
-kubectl get pods \
-  -n zero-downtime \
-  -o wide
-```
-
-Expected:
-
-```text
-3/3 Running
-```
-
-Check rollout:
-
-```bash
-kubectl rollout status \
-  deployment/zero-downtime-app \
-  -n zero-downtime
-```
-
----
-
-# 30. Check Kubernetes Health
 
 ```bash
 kubectl get pods -n zero-downtime
 ```
 
-Then:
+Check deployment:
 
 ```bash
-kubectl describe deployment \
-  zero-downtime-app \
-  -n zero-downtime
+kubectl get deployment -n zero-downtime
 ```
 
-Check application logs:
+Check service:
 
 ```bash
-kubectl logs \
-  deployment/zero-downtime-app \
-  -n zero-downtime
+kubectl get service -n zero-downtime
+```
+
+Check ingress:
+
+```bash
+kubectl get ingress -n zero-downtime
 ```
 
 ---
 
-# 31. Get the ALB Address
+# Retrieve ALB Hostname
 
-```bash
-kubectl get ingress \
-  -n zero-downtime
-```
+The ALB hostname should not be hard-coded.
 
-Or:
-
-```bash
-kubectl get ingress \
-  -n zero-downtime \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
-```
-
-Store it:
+Retrieve it dynamically:
 
 ```bash
 export ALB_HOST=$(kubectl get ingress \
@@ -1653,10 +1430,22 @@ export ALB_HOST=$(kubectl get ingress \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 ```
 
-Test:
+Verify:
 
 ```bash
-curl http://${ALB_HOST}/health
+echo "${ALB_HOST}"
+```
+
+Test the application:
+
+```bash
+curl "http://${ALB_HOST}/"
+```
+
+Health check:
+
+```bash
+curl "http://${ALB_HOST}/health"
 ```
 
 Expected:
@@ -1665,57 +1454,60 @@ Expected:
 OK
 ```
 
+Readiness:
+
+```bash
+curl "http://${ALB_HOST}/ready"
+```
+
+Expected:
+
+```text
+READY
+```
+
 ---
 
-# 32. Jenkins Pipeline Configuration
+# Configure Jenkins
 
 Create a Jenkins Pipeline job:
 
 ```text
-Jenkins
-  |
-  +--> New Item
-  |
-  +--> zero-downtime-k8s
-  |
-  +--> Pipeline
+zero-downtime-k8s
 ```
 
-Configure the repository:
+The pipeline should point to the GitHub repository:
 
 ```text
-https://github.com/rahulsharma-rks/zero-downtime-k8s.git
+https://github.com/rahulsharma-rks/zero-downtime-k8s
 ```
 
-Pipeline definition:
-
-```text
-Pipeline script from SCM
-```
-
-SCM:
-
-```text
-Git
-```
-
-Branch:
-
-```text
-*/main
-```
-
-Script path:
+The repository contains:
 
 ```text
 Jenkinsfile
 ```
 
+The Jenkins server must have access to:
+
+```text
+GitHub
+AWS
+ECR
+EKS
+Kubernetes
+Docker
+Trivy
+Terraform
+```
+
+The Jenkins EC2 IAM role should be used for AWS authentication where possible.
+
 ---
 
-# 33. Jenkins Pipeline Stages
+# Jenkins Pipeline
 
-The `Jenkinsfile` implements stages similar to:
+The Jenkins pipeline contains the following major stages:
 
 ```text
 Checkout
@@ -1726,7 +1518,7 @@ Unit Tests
     ↓
 Docker Build
     ↓
-Trivy Security Scan
+Trivy Scan
     ↓
 ECR Login
     ↓
@@ -1739,25 +1531,24 @@ Capture Previous Image
 Deploy
     ↓
 Verify Deployment
+    ↓
+Rollback if Required
 ```
-
-The pipeline also contains rollback logic.
 
 ---
 
-# 34. Unit Tests
+# Unit Testing
 
-The pipeline creates a Python virtual environment and executes:
+Jenkins runs:
 
 ```bash
-.venv/bin/python \
-  -m unittest discover \
+.venv/bin/python -m unittest discover \
   -s app \
   -p 'test_*.py' \
   -v
 ```
 
-The application currently contains tests for:
+The application has tests for:
 
 ```text
 /
@@ -1767,9 +1558,9 @@ The application currently contains tests for:
 
 ---
 
-# 35. Docker Build
+# Docker Build
 
-The Jenkins pipeline builds using BuildKit:
+The pipeline uses BuildKit/buildx:
 
 ```bash
 docker buildx build \
@@ -1780,23 +1571,27 @@ docker buildx build \
   app/
 ```
 
-The Jenkins build number becomes the application image version.
+The Jenkins build number becomes the application image tag.
 
-Example:
+For example:
 
 ```text
 Build #38
-      |
-      v
-ECR image:
-zero-downtime-app:38
+```
+
+produces:
+
+```text
+:38
 ```
 
 ---
 
-# 36. Trivy Security Gate
+# Trivy Security Scan
 
-The pipeline scans the local Docker image before pushing it:
+Trivy is the blocking security gate.
+
+The pipeline scans:
 
 ```bash
 trivy image \
@@ -1808,178 +1603,71 @@ trivy image \
   "${IMAGE_NAME}"
 ```
 
-The important behavior is:
+The policy is:
 
 ```text
-0 HIGH/CRITICAL
-       |
-       v
-Continue
+HIGH     → build failure
+CRITICAL → build failure
 ```
 
-while:
-
-```text
-HIGH/CRITICAL found
-       |
-       v
-Pipeline FAILURE
-       |
-       X
-No deployment
-```
+if the vulnerability is applicable under the configured scan policy.
 
 ---
 
-# 37. ECR Push
+# ECR Vulnerability Scan
 
-Jenkins authenticates against ECR:
+After pushing the image to ECR, Jenkins waits for ECR scan results.
 
-```bash
-aws ecr get-login-password \
-  --region ap-south-1 \
-  | docker login \
-      --username AWS \
-      --password-stdin \
-      520701146276.dkr.ecr.ap-south-1.amazonaws.com
-```
+ECR scanning is asynchronous.
 
-The repository is:
-
-```text
-zero-downtime-app
-```
-
-Images are tagged using Jenkins build numbers.
-
-Example:
-
-```text
-520701146276.dkr.ecr.ap-south-1.amazonaws.com/zero-downtime-app:38
-```
-
-For a different AWS account, replace:
-
-```text
-520701146276
-```
-
-with your own account ID.
-
----
-
-# 38. ECR Scan Verification
-
-ECR vulnerability scanning is asynchronous.
-
-Therefore Jenkins does not assume the result is immediately available.
-
-The pipeline polls:
+The pipeline therefore polls:
 
 ```bash
 aws ecr describe-image-scan-findings
 ```
 
-until results become available.
+until scan results become available.
 
-The pipeline reports:
+The pipeline prints:
 
 ```text
+ECR SECURITY SCAN SUMMARY
+
 HIGH
 CRITICAL
-Finding
-Package
-Description
 ```
 
-ECR scanning is currently **report-only**.
+It also reports the relevant vulnerability information.
 
-The blocking security gate is Trivy.
+ECR scanning is currently:
+
+```text
+Report-only
+```
+
+while Trivy remains the blocking gate.
 
 ---
 
-# 39. Kubernetes Deployment from Jenkins
+# Kubernetes Deployment
 
-The pipeline updates:
+The pipeline deploys a new image using the Kubernetes Deployment.
 
-```text
-deployment/zero-downtime-app
-```
-
-with the new ECR image.
-
-The Kubernetes container name is:
+The application container name is:
 
 ```text
 app
 ```
 
-Example:
+A deployment can be performed manually with:
 
 ```bash
-kubectl set image \
-  deployment/zero-downtime-app \
-  app=<ECR_IMAGE>:<BUILD_NUMBER> \
+kubectl set image deployment/zero-downtime-app \
+  app="${ECR_REGISTRY}/${ECR_REPOSITORY}:NEW_TAG" \
   -n zero-downtime
 ```
 
-Then Jenkins waits for:
-
-```bash
-kubectl rollout status
-```
-
----
-
-# 40. Automatic Rollback
-
-If rollout verification fails, Jenkins performs a deterministic rollback.
-
-Conceptually:
-
-```text
-Previous image
-      |
-      v
-:37
-
-New image
-      |
-      v
-:38
-      |
-      X
-Readiness failure
-      |
-      v
-Restore :37
-```
-
-The pipeline verifies the rollback rather than simply issuing the rollback command and assuming it worked.
-
----
-
-# 41. Manual Rollback
-
-A Kubernetes rollback can also be performed manually.
-
-View rollout history:
-
-```bash
-kubectl rollout history \
-  deployment/zero-downtime-app \
-  -n zero-downtime
-```
-
-Rollback:
-
-```bash
-kubectl rollout undo \
-  deployment/zero-downtime-app \
-  -n zero-downtime
-```
-
-Wait:
+Then monitor:
 
 ```bash
 kubectl rollout status \
@@ -1987,28 +1675,65 @@ kubectl rollout status \
   -n zero-downtime
 ```
 
-Verify:
+---
+
+# Rollback
+
+Manual rollback:
 
 ```bash
-kubectl get deployment \
-  zero-downtime-app \
-  -n zero-downtime \
-  -o jsonpath='{.spec.template.spec.containers[0].image}'
+kubectl rollout undo \
+  deployment/zero-downtime-app \
+  -n zero-downtime
+```
+
+Monitor:
+
+```bash
+kubectl rollout status \
+  deployment/zero-downtime-app \
+  -n zero-downtime
+```
+
+The Jenkins pipeline performs deterministic rollback when the new version fails its deployment verification.
+
+---
+
+# Monitoring and Alerting
+
+The project integrates:
+
+```text
+Amazon CloudWatch
+CloudWatch Container Insights
+CloudWatch Alarms
+Amazon SNS
+```
+
+Container Insights provides Kubernetes workload metrics.
+
+The project monitors:
+
+```text
+Pod CPU
+Pod Memory
+Container Restarts
+ALB Target 5xx
 ```
 
 ---
 
-# 42. Monitoring
+# CloudWatch Log Groups
 
-Amazon CloudWatch Container Insights is enabled for EKS.
+The project configures retention for Container Insights log groups.
 
-The project creates CloudWatch log groups for:
+Examples:
 
 ```text
-application
-dataplane
-host
-performance
+/aws/containerinsights/zero-downtime-eks/application
+/aws/containerinsights/zero-downtime-eks/dataplane
+/aws/containerinsights/zero-downtime-eks/host
+/aws/containerinsights/zero-downtime-eks/performance
 ```
 
 Retention:
@@ -2017,115 +1742,129 @@ Retention:
 14 days
 ```
 
-CloudWatch alarms include:
+---
 
-### Application CPU
+# CloudWatch Alarms
 
-Triggers when application CPU utilization exceeds:
+The Terraform configuration includes alarms for:
 
-```text
-80%
-```
+## High CPU
 
-for:
-
-```text
-3 consecutive minutes
-```
-
-### Application memory
-
-Triggers when application memory utilization exceeds:
+Threshold:
 
 ```text
 80%
 ```
 
-for:
+for three consecutive one-minute periods.
+
+## High Memory
+
+Threshold:
 
 ```text
-3 consecutive minutes
+80%
 ```
 
-### Container restarts
+for three consecutive one-minute periods.
 
-Triggers when application container restart count is:
+## Container Restart
+
+Alarm when the application container restart metric reaches:
 
 ```text
 >= 1
 ```
 
-### ALB target 5xx
+## ALB Target 5xx
 
-Triggers when the application ALB target returns:
+Alarm when the ALB target returns:
 
 ```text
 >= 1 HTTP 5xx
 ```
 
-The alarms publish notifications to:
-
-```text
-Amazon SNS
-```
+during the evaluation period.
 
 ---
 
-# 43. Useful Kubernetes Commands
+# SNS Notifications
 
-Get everything:
+CloudWatch alarms publish to an SNS topic:
+
+```text
+zero-downtime-cloudwatch-alerts
+```
+
+An email subscription is configured through Terraform.
+
+The recipient must confirm the SNS subscription email before notifications are delivered.
+
+---
+
+# Environment-Specific CloudWatch Configuration
+
+The ALB and Target Group dimensions in:
+
+```text
+terraform/cloudwatch_alarms.tf
+```
+
+contain environment-specific identifiers.
+
+These identifiers are generated by the AWS Load Balancer Controller and therefore differ between environments.
+
+When reproducing the project in another AWS account or cluster, update those dimensions after the ALB and target group are created.
+
+Retrieve load balancer information with:
+
+```bash
+aws elbv2 describe-load-balancers \
+  --region ap-south-1
+```
+
+Retrieve target groups with:
+
+```bash
+aws elbv2 describe-target-groups \
+  --region ap-south-1
+```
+
+Do not assume identifiers from the original environment will be reused.
+
+---
+
+# Useful Kubernetes Commands
+
+## Get all resources
 
 ```bash
 kubectl get all -n zero-downtime
 ```
 
-Pods:
+## Get pods
 
 ```bash
 kubectl get pods -n zero-downtime -o wide
 ```
 
-Deployment:
+## Watch pods
 
 ```bash
-kubectl get deployment -n zero-downtime
-```
-
-Services:
-
-```bash
-kubectl get svc -n zero-downtime
-```
-
-Ingress:
-
-```bash
-kubectl get ingress -n zero-downtime
-```
-
-PDB:
-
-```bash
-kubectl get pdb -n zero-downtime
-```
-
-Deployment image:
-
-```bash
-kubectl get deployment zero-downtime-app \
+kubectl get pods \
   -n zero-downtime \
-  -o jsonpath='{.spec.template.spec.containers[0].image}'
+  -w
 ```
 
-Rollout:
+## Deployment
 
 ```bash
-kubectl rollout status \
-  deployment/zero-downtime-app \
+kubectl get deployment \
+  zero-downtime-app \
   -n zero-downtime
 ```
 
-Deployment history:
+## Rollout history
 
 ```bash
 kubectl rollout history \
@@ -2133,25 +1872,59 @@ kubectl rollout history \
   -n zero-downtime
 ```
 
-Logs:
+## Rollout status
+
+```bash
+kubectl rollout status \
+  deployment/zero-downtime-app \
+  -n zero-downtime
+```
+
+## Pod logs
 
 ```bash
 kubectl logs \
-  deployment/zero-downtime-app \
+  -n zero-downtime \
+  deployment/zero-downtime-app
+```
+
+## Previous container logs
+
+For CrashLoopBackOff troubleshooting:
+
+```bash
+kubectl logs \
+  -n zero-downtime \
+  <pod-name> \
+  --previous
+```
+
+## Describe pod
+
+```bash
+kubectl describe pod \
+  -n zero-downtime \
+  <pod-name>
+```
+
+## Check ingress
+
+```bash
+kubectl get ingress \
   -n zero-downtime
 ```
 
 ---
 
-# 44. Useful AWS Commands
+# Useful AWS Commands
 
-Check identity:
+## Current AWS identity
 
 ```bash
 aws sts get-caller-identity
 ```
 
-EKS:
+## EKS cluster
 
 ```bash
 aws eks describe-cluster \
@@ -2159,21 +1932,20 @@ aws eks describe-cluster \
   --region ap-south-1
 ```
 
-Nodes:
+## EKS nodes
 
 ```bash
 kubectl get nodes -o wide
 ```
 
-ECR:
+## ECR repositories
 
 ```bash
 aws ecr describe-repositories \
-  --repository-names zero-downtime-app \
   --region ap-south-1
 ```
 
-List ECR images:
+## ECR images
 
 ```bash
 aws ecr describe-images \
@@ -2181,509 +1953,795 @@ aws ecr describe-images \
   --region ap-south-1
 ```
 
-EKS add-ons:
+## ECR scan findings
 
 ```bash
-aws eks list-addons \
-  --cluster-name zero-downtime-eks \
+aws ecr describe-image-scan-findings \
+  --repository-name zero-downtime-app \
+  --image-id imageTag=38 \
   --region ap-south-1
 ```
 
 ---
 
-# 45. Terraform Commands
+# Replication Guide
 
-Initialize:
-
-```bash
-terraform init
-```
-
-Format:
-
-```bash
-terraform fmt
-```
-
-Validate:
-
-```bash
-terraform validate
-```
-
-Plan:
-
-```bash
-terraform plan
-```
-
-Apply:
-
-```bash
-terraform apply
-```
-
-Destroy:
-
-```bash
-terraform destroy
-```
-
-**Warning:** `terraform destroy` removes the infrastructure created by the project. Review the plan carefully before confirming.
-
----
-
-# 46. Reproducing the Complete Project
-
-The recommended replication sequence is:
-
-## Step 1 — Clone
+## Step 1 - Clone Repository
 
 ```bash
 git clone https://github.com/rahulsharma-rks/zero-downtime-k8s.git
-
 cd zero-downtime-k8s
 ```
 
-## Step 2 — Configure AWS
+## Step 2 - Configure AWS
+
+```bash
+export AWS_REGION=ap-south-1
+```
+
+Verify:
 
 ```bash
 aws sts get-caller-identity
 ```
 
-## Step 3 — Configure Terraform variables
+## Step 3 - Provision Infrastructure
 
 ```bash
 cd terraform
 ```
 
-Create:
+Create your local:
 
 ```text
 terraform.tfvars
 ```
 
-with your environment-specific configuration:
-
-```hcl
-aws_region   = "ap-south-1"
-project_name = "zero-downtime"
-cluster_name = "zero-downtime-eks"
-
-alert_email = "YOUR_EMAIL@example.com"
-```
-
-## Step 4 — Provision AWS
+Then:
 
 ```bash
 terraform init
-terraform fmt
 terraform validate
 terraform plan
 terraform apply
 ```
 
-## Step 5 — Configure kubectl
+## Step 4 - Configure kubectl
 
 ```bash
 aws eks update-kubeconfig \
-  --region ap-south-1 \
+  --region "${AWS_REGION}" \
   --name zero-downtime-eks
 ```
 
-## Step 6 — Verify cluster
+Verify:
 
 ```bash
 kubectl get nodes
 ```
 
-## Step 7 — Configure Jenkins
+## Step 5 - Verify AWS Load Balancer Controller
 
-Install:
-
-```text
-Jenkins
-Java
-Git
-Docker
-Docker Buildx
-AWS CLI
-Terraform
-kubectl
-Trivy
-Python
+```bash
+kubectl get pods \
+  -n kube-system | grep aws-load-balancer-controller
 ```
 
-## Step 8 — Configure Jenkins IAM
+The controller must be operational before applying the Ingress.
 
-Use an EC2 instance profile/role with the required AWS permissions.
+## Step 6 - Deploy Kubernetes Resources
 
-## Step 9 — Configure Jenkins job
-
-Point Jenkins at:
-
-```text
-https://github.com/rahulsharma-rks/zero-downtime-k8s.git
+```bash
+cd ..
 ```
 
-Branch:
-
-```text
-main
+```bash
+kubectl create namespace zero-downtime
 ```
 
-Pipeline file:
+```bash
+kubectl apply -f k8s/service.yaml \
+  -n zero-downtime
+
+kubectl apply -f k8s/deployment.yaml \
+  -n zero-downtime
+
+kubectl apply -f k8s/pdb.yaml \
+  -n zero-downtime
+
+kubectl apply -f k8s/ingress.yaml \
+  -n zero-downtime
+```
+
+## Step 7 - Verify Application
+
+```bash
+kubectl get pods \
+  -n zero-downtime \
+  -o wide
+```
+
+```bash
+kubectl get deployment \
+  -n zero-downtime
+```
+
+```bash
+kubectl get ingress \
+  -n zero-downtime
+```
+
+Retrieve the ALB:
+
+```bash
+export ALB_HOST=$(kubectl get ingress \
+  -n zero-downtime \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+```
+
+Test:
+
+```bash
+curl "http://${ALB_HOST}/"
+curl "http://${ALB_HOST}/health"
+curl "http://${ALB_HOST}/ready"
+```
+
+## Step 8 - Configure Jenkins
+
+Install the required tools on the Jenkins EC2 instance.
+
+Configure Jenkins to use:
+
+```text
+https://github.com/rahulsharma-rks/zero-downtime-k8s
+```
+
+Create a Pipeline job:
+
+```text
+zero-downtime-k8s
+```
+
+Use:
 
 ```text
 Jenkinsfile
 ```
 
-## Step 10 — Run Jenkins
+## Step 9 - Run Pipeline
 
 The pipeline performs:
 
 ```text
 Checkout
-→ Unit Tests
-→ Docker Build
-→ Trivy
-→ ECR
-→ ECR Scan
-→ Kubernetes Deployment
-→ Rollout Verification
-→ ALB Verification
+Test
+Build
+Trivy Scan
+ECR Push
+ECR Scan
+Deploy
+Verify
+Rollback if necessary
 ```
 
 ---
 
-# 47. Expected Final State
+# Testing Zero-Downtime Deployment
 
-After successful deployment:
-
-```text
-EKS Cluster
-└── zero-downtime
-    └── Deployment
-        ├── Pod 1 - Running
-        ├── Pod 2 - Running
-        └── Pod 3 - Running
-```
-
-All three replicas should be ready:
-
-```text
-READY 3/3
-```
-
-The application should return:
+Deploy a new image:
 
 ```bash
-curl http://${ALB_HOST}/health
+kubectl set image deployment/zero-downtime-app \
+  app="${ECR_REGISTRY}/${ECR_REPOSITORY}:NEW_TAG" \
+  -n zero-downtime
 ```
 
-Result:
-
-```text
-OK
-```
-
-The application endpoint:
+Watch:
 
 ```bash
-curl http://${ALB_HOST}/
+kubectl get pods \
+  -n zero-downtime \
+  -w
 ```
 
-should display the current application version.
+At the same time, test:
+
+```bash
+while true; do
+  curl -s -o /dev/null \
+    -w "%{http_code}\n" \
+    "http://${ALB_HOST}/health"
+done
+```
+
+During a normal rolling update, the expectation is that healthy replicas continue serving traffic while Kubernetes replaces the old pods.
 
 ---
 
-# 48. Security Considerations
+# Testing Automatic Rollback
 
-This project intentionally avoids storing AWS credentials in Git.
+For a controlled failure test, configure the application environment with:
+
+```text
+READINESS_FAIL=true
+```
+
+Then deploy the new version.
+
+Expected behavior:
+
+```text
+New Pod Created
+      ↓
+Pod Starts
+      ↓
+/ready = 503
+      ↓
+Pod Never Becomes Ready
+      ↓
+Rollout Fails / Times Out
+      ↓
+Jenkins Detects Failure
+      ↓
+Previous Image Restored
+      ↓
+Rollback Verified
+      ↓
+ALB Health Check = 200
+```
+
+After the test, restore:
+
+```text
+READINESS_FAIL=false
+```
+
+---
+
+# Terraform Destroy / Environment Cleanup
+
+When the project is no longer required, Terraform can destroy the AWS infrastructure.
+
+This is especially useful for a lab environment to avoid unnecessary AWS charges.
+
+Go to:
+
+```bash
+cd /home/ubuntu/zero-downtime-k8s/terraform
+```
+
+First inspect the Terraform state:
+
+```bash
+terraform state list
+```
+
+Create a destroy plan:
+
+```bash
+terraform plan -destroy
+```
+
+**Review the output carefully.**
+
+If the resources are correct:
+
+```bash
+terraform destroy
+```
+
+Confirm:
+
+```text
+yes
+```
+
+## Verify EKS Was Deleted
+
+```bash
+aws eks describe-cluster \
+  --name zero-downtime-eks \
+  --region ap-south-1
+```
+
+The expected result is a resource-not-found error.
+
+## Verify ECR Was Deleted
+
+```bash
+aws ecr describe-repositories \
+  --repository-names zero-downtime-app \
+  --region ap-south-1
+```
+
+The expected result is a repository-not-found error if Terraform destroyed the repository.
+
+## Verify ALB Was Deleted
+
+```bash
+aws elbv2 describe-load-balancers \
+  --region ap-south-1 \
+  --query 'LoadBalancers[?contains(LoadBalancerName, `k8s-zerodown`)].LoadBalancerName' \
+  --output table
+```
+
+No matching load balancer should remain after Kubernetes and the AWS Load Balancer Controller have cleaned up the resources.
+
+## Verify CloudWatch Alarms
+
+```bash
+aws cloudwatch describe-alarms \
+  --alarm-name-prefix "zero-downtime-" \
+  --region ap-south-1 \
+  --query 'MetricAlarms[].AlarmName' \
+  --output table
+```
+
+## Verify SNS
+
+```bash
+aws sns list-topics \
+  --region ap-south-1 \
+  --query 'Topics[?contains(TopicArn, `zero-downtime`)].TopicArn' \
+  --output table
+```
+
+## Verify Terraform State
+
+```bash
+terraform state list
+```
+
+The state should contain no remaining managed infrastructure resources after a successful destroy.
+
+---
+
+# Important Cleanup Note
+
+`terraform destroy` removes the infrastructure managed by Terraform.
+
+It does **not** delete the GitHub repository.
+
+The following remain in GitHub:
+
+```text
+Application source
+Terraform code
+Kubernetes manifests
+Jenkinsfile
+Dockerfile
+README
+Git history
+```
+
+This allows the complete environment to be recreated later.
+
+---
+
+# Security Considerations
+
+The project incorporates several security practices.
+
+## IAM
+
+Prefer:
+
+```text
+EC2 Instance Profile / IAM Role
+```
+
+over static AWS access keys.
+
+## Kubernetes
+
+The application uses:
+
+```text
+Non-root user
+Read-only root filesystem
+Dropped Linux capabilities
+No privilege escalation
+RuntimeDefault seccomp
+Resource limits
+Resource requests
+```
+
+## Container Image
+
+The image is scanned using:
+
+```text
+Trivy
+```
+
+and:
+
+```text
+Amazon ECR scanning
+```
+
+## Vulnerability Management
+
+Vulnerabilities are investigated rather than blindly ignored.
+
+The workflow is:
+
+```text
+Finding
+  ↓
+Affected package
+  ↓
+Affected base image
+  ↓
+Exploitability / applicability
+  ↓
+Remediation
+  ↓
+Verification
+```
+
+## Secrets
 
 Do not commit:
 
 ```text
-terraform.tfvars
-.env
 AWS access keys
 AWS secret keys
-private keys
-Jenkins credentials
-Kubernetes secrets containing credentials
+terraform.tfvars
+Passwords
+Private keys
+Jenkins secrets
 ```
 
-Use:
-
-- IAM instance profiles
-- IAM roles
-- Jenkins credential management where required
-- Kubernetes Secrets / external secret-management solutions for sensitive application data
-
-The `alert_email` Terraform variable is marked sensitive, but the value should still be supplied through an environment-specific mechanism rather than committed to Git.
+Environment-specific sensitive values should be provided through secure configuration mechanisms.
 
 ---
 
-# 49. What This Project Demonstrates
+# What This Project Demonstrates
 
-This project demonstrates practical understanding of:
-
-### AWS
-
-- VPC
-- Subnets
-- NAT Gateway
-- EKS
-- ECR
-- IAM
-- ALB
-- CloudWatch
-- SNS
-
-### Terraform
-
-- Infrastructure as Code
-- Terraform modules
-- Variables
-- Outputs
-- IAM resources
-- EKS provisioning
-- Resource dependencies
-- Validation and formatting
-
-### Kubernetes
-
-- Deployments
-- Rolling updates
-- Services
-- Ingress
-- Readiness probes
-- Liveness probes
-- Startup probes
-- PodDisruptionBudgets
-- Resource limits
-- Security contexts
-- Graceful termination
-- Topology spreading
-- Rollbacks
-
-### Jenkins
-
-- Pipeline as Code
-- Automated testing
-- Docker builds
-- Security gates
-- ECR integration
-- Kubernetes deployments
-- Automated rollback
-- Deployment verification
-
-### Container Security
-
-- BuildKit
-- Trivy
-- ECR scanning
-- Base-image hardening
-- Non-root containers
-- Read-only filesystems
-- Dropped Linux capabilities
-
-### Observability
-
-- CloudWatch Container Insights
-- Kubernetes application metrics
-- Container restart monitoring
-- ALB 5xx monitoring
-- SNS notifications
-
----
-
-# 50. Important Lessons Learned
-
-The project was intentionally built and tested through failure scenarios rather than only demonstrating a successful deployment.
-
-Important lessons included:
-
-1. **Readiness is critical for zero-downtime deployments.**
-
-   A pod being `Running` does not necessarily mean it is ready to receive production traffic.
-
-2. **`maxUnavailable: 0` alone is not enough.**
-
-   Health probes, graceful termination, capacity, and load-balancer health checks must work together.
-
-3. **Rollback must be deterministic.**
-
-   A pipeline should verify which image was deployed before the change and restore that exact image when possible.
-
-4. **External validation matters.**
-
-   A successful Kubernetes rollout does not automatically prove that users can reach the application.
-
-   Therefore the pipeline also validates the ALB.
-
-5. **Security scanning belongs before deployment.**
-
-   Trivy is therefore a blocking CI gate.
-
-6. **ECR scanning is asynchronous.**
-
-   Jenkins must wait for the scan results instead of assuming they are immediately available.
-
-7. **Container hardening can expose application assumptions.**
-
-   Running as non-root and using a read-only root filesystem forces the application to explicitly handle writable locations such as `/tmp`.
-
-8. **Observability needs to be designed alongside deployment.**
-
-   CloudWatch metrics and alarms provide operational feedback after deployment.
-
----
-
-# 51. Project Limitations
-
-This project is production-style, but it is not intended to represent a complete enterprise platform.
-
-It does not currently implement:
-
-- Multi-region disaster recovery
-- Blue/Green deployment
-- Canary deployment
-- Database migration automation
-- Application authentication
-- External secrets management
-- Multi-environment promotion such as Dev → Stage → Production
-- GitOps with Argo CD
-- Service mesh
-- Full distributed tracing
-- Advanced SLO/SLA management
-- Automated DR testing
-
-Those are separate architectural concerns that can be added depending on the production requirements.
-
----
-
-# 52. Repository
-
-Source code:
-
-**GitHub:** https://github.com/rahulsharma-rks/zero-downtime-k8s
-
-The repository contains the complete Terraform, Kubernetes manifests, application code, Dockerfile, Jenkins pipeline, IAM policy, and CloudWatch configuration required for the project.
-
----
-
-# 53. Final Architecture Summary
-
-The final system can be summarized as:
+## AWS
 
 ```text
-                         ┌───────────────┐
-                         │   Developer   │
-                         └───────┬───────┘
-                                 │
-                                 │ git push
-                                 ▼
-                         ┌───────────────┐
-                         │    GitHub     │
-                         └───────┬───────┘
-                                 │
-                                 ▼
-                  ┌──────────────────────────┐
-                  │ Jenkins - Ubuntu EC2     │
-                  │                          │
-                  │ Unit Tests               │
-                  │ Docker BuildKit          │
-                  │ Trivy                    │
-                  │ ECR                      │
-                  │ kubectl                   │
-                  │ Terraform                 │
-                  └────────────┬─────────────┘
-                               │
-               ┌───────────────┼────────────────┐
-               │               │                │
-               ▼               ▼                ▼
-          ┌─────────┐      ┌─────────┐    ┌──────────┐
-          │   ECR   │      │   EKS   │    │Terraform │
-          │ Images  │      │ Cluster │    │  Infra   │
-          └─────────┘      └────┬────┘    └──────────┘
-                                │
-                                ▼
-                     ┌────────────────────┐
-                     │ Kubernetes         │
-                     │ Deployment         │
-                     │                    │
-                     │  Pod  Pod  Pod     │
-                     └─────────┬──────────┘
-                               │
-                               ▼
-                     ┌────────────────────┐
-                     │ Kubernetes Service │
-                     └─────────┬──────────┘
-                               │
-                               ▼
-                     ┌────────────────────┐
-                     │ AWS Application    │
-                     │ Load Balancer      │
-                     └─────────┬──────────┘
-                               │
-                               ▼
-                            Users
-
-
-       ┌─────────────────────────────────────────┐
-       │              Observability              │
-       │                                         │
-       │ CloudWatch Container Insights           │
-       │ CloudWatch Alarms                       │
-       │ SNS Notifications                       │
-       └─────────────────────────────────────────┘
+VPC
+EC2
+EKS
+ECR
+IAM
+ALB
+NAT Gateway
+CloudWatch
+SNS
 ```
 
----
-
-# 54. Final Outcome
-
-The completed implementation provides an automated path from source code to production:
+## Kubernetes
 
 ```text
-GitHub
-  ↓
-Jenkins
-  ↓
-Unit Tests
-  ↓
-BuildKit
-  ↓
-Trivy
-  ↓
-Amazon ECR
-  ↓
-ECR Scan
-  ↓
-Amazon EKS
-  ↓
-Rolling Deployment
-  ↓
-Readiness Verification
-  ↓
-ALB Verification
-  ↓
-Production
-```
-
-If the deployment fails:
-
-```text
-Failed Release
-      ↓
+Deployments
+Rolling Updates
+Services
+Ingress
+Readiness Probes
+Liveness Probes
+Startup Probes
+PDB
+Topology Spread
+Security Context
+Resource Requests/Limits
 Rollback
-      ↓
-Previous Healthy Image
-      ↓
-Rollout Verification
-      ↓
-ALB Health Verification
 ```
 
-The result is a reproducible, security-conscious, observable Kubernetes CI/CD implementation with **zero-downtime rolling deployments and automated rollback**.
+## DevOps
+
+```text
+CI/CD
+Infrastructure as Code
+Containerization
+Automated Testing
+Security Scanning
+Automated Rollback
+Observability
+Failure Testing
+```
+
+## Terraform
+
+```text
+Reusable infrastructure
+AWS modules
+Resource dependencies
+State management
+Infrastructure provisioning
+Infrastructure destruction
+```
+
+## Jenkins
+
+```text
+Pipeline as Code
+Automated testing
+Docker builds
+Security gates
+ECR integration
+Kubernetes deployment
+Rollback automation
+```
+
+---
+
+# Lessons Learned
+
+## 1. A healthy Pod spec does not mean a healthy application
+
+Kubernetes can successfully create a pod while the application itself is unable to serve traffic.
+
+That is why readiness and liveness probes are critical.
+
+## 2. Readiness is critical for zero-downtime deployments
+
+A new pod should not receive production traffic until it is actually ready.
+
+The `/ready` endpoint provides that signal.
+
+## 3. Previous container logs matter during CrashLoopBackOff
+
+When investigating a restarting container, the previous container instance can contain the most useful logs:
+
+```bash
+kubectl logs <pod> --previous
+```
+
+## 4. ImagePullBackOff can hide infrastructure problems
+
+A pod specification may be completely correct while image pulls fail because of:
+
+```text
+NAT
+Networking
+Registry access
+DNS
+IAM
+```
+
+## 5. Security scanning is not the end of vulnerability management
+
+A scanner finding needs investigation.
+
+The actual workflow is:
+
+```text
+Finding
+  ↓
+Affected package
+  ↓
+Affected base image
+  ↓
+Exploitability / applicability
+  ↓
+Remediation
+  ↓
+Verification
+```
+
+## 6. ECR scans are asynchronous
+
+Immediately querying ECR after pushing an image can result in scan results not being available yet.
+
+The pipeline therefore polls until results become available.
+
+## 7. Trivy and ECR serve different purposes
+
+In this project:
+
+```text
+Trivy
+```
+
+is the blocking CI security gate.
+
+While:
+
+```text
+ECR
+```
+
+provides an additional AWS-native vulnerability report.
+
+## 8. Rollback must be deterministic
+
+Simply executing:
+
+```bash
+kubectl rollout undo
+```
+
+is not always enough for a CI/CD system that needs explicit verification.
+
+The pipeline captures the previous image and verifies that the expected version is restored.
+
+---
+
+# Known Limitations
+
+This is a production-style learning and portfolio project, not a complete enterprise platform.
+
+Some environment-specific components require additional work for a fully portable production implementation.
+
+## AWS Load Balancer Controller
+
+The controller's IAM/installation configuration is not represented as a dedicated Terraform module in this repository.
+
+It must be installed and configured separately when reproducing the environment.
+
+## CloudWatch ALB Dimensions
+
+The CloudWatch ALB alarms contain environment-specific:
+
+```text
+LoadBalancer
+TargetGroup
+```
+
+dimensions.
+
+These identifiers change when a new ALB is created.
+
+They must therefore be updated for another environment.
+
+## Jenkins
+
+Jenkins is hosted on a standalone Ubuntu EC2 instance.
+
+For a larger production organization, Jenkins itself would require additional:
+
+```text
+High availability
+Backup
+Secret management
+Agent management
+Access control
+Monitoring
+Disaster recovery
+```
+
+## Single NAT Gateway
+
+The lab architecture uses one NAT Gateway.
+
+A production environment requiring higher availability across Availability Zones would generally consider multiple NAT Gateways and corresponding routing.
+
+## Zero Downtime Is Not Absolute
+
+The Kubernetes configuration is designed to maintain application availability during normal rolling updates.
+
+It does not guarantee zero downtime against every possible failure such as:
+
+```text
+Complete AZ failure
+Cluster failure
+ALB failure
+AWS service disruption
+Application dependency failure
+Database failure
+Network partition
+Incorrect infrastructure changes
+```
+
+---
+
+# Final Result
+
+The final system successfully demonstrated:
+
+```text
+Terraform Infrastructure
+        ↓
+Amazon EKS
+        ↓
+Kubernetes Application
+        ↓
+AWS Load Balancer Controller
+        ↓
+Application Load Balancer
+        ↓
+Zero-Downtime Rolling Deployment
+        ↓
+Jenkins CI/CD
+        ↓
+Automated Rollback
+        ↓
+Production Hardening
+        ↓
+Failure Testing
+        ↓
+Trivy Security Gate
+        ↓
+ECR Vulnerability Reporting
+        ↓
+Vulnerability Remediation
+        ↓
+CloudWatch Monitoring
+        ↓
+SNS Alerting
+```
+
+The final application release was validated with:
+
+```text
+3/3 application pods Ready
+0 unexpected restarts
+ALB health check = HTTP 200
+/health = HTTP 200
+/ready = HTTP 200
+Trivy HIGH/CRITICAL = 0
+```
+
+The final verified production image during development was:
+
+```text
+Build #38
+```
+
+The final security hardening work resulted in the remediation of the investigated zlib vulnerability before deployment.
+
+---
+
+# Repository
+
+GitHub:
+
+https://github.com/rahulsharma-rks/zero-downtime-k8s
+
+The repository contains the complete project source, including:
+
+```text
+Terraform
+Kubernetes manifests
+Jenkins pipeline
+Dockerfile
+Python application
+Unit tests
+IAM configuration
+CloudWatch configuration
+```
+
+---
+
+# Project Summary
+
+This project was built to demonstrate the complete lifecycle of a Kubernetes application on AWS:
+
+```text
+PLAN
+ ↓
+PROVISION
+ ↓
+BUILD
+ ↓
+TEST
+ ↓
+SCAN
+ ↓
+PUSH
+ ↓
+DEPLOY
+ ↓
+VERIFY
+ ↓
+MONITOR
+ ↓
+ROLL BACK WHEN REQUIRED
+ ↓
+HARDEN
+ ↓
+DESTROY
+```
+
+The key objective was not simply to deploy an application to EKS, but to demonstrate how infrastructure, Kubernetes, CI/CD, security, observability, and failure recovery can be combined into a repeatable DevOps workflow.
+'''
+
+path = "/mnt/data/README.md"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(readme)
+
+print(path)
