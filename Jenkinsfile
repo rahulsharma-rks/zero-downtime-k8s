@@ -14,7 +14,7 @@ pipeline {
         EKS_CLUSTER = 'zero-downtime-eks'
         K8S_NAMESPACE = 'zero-downtime'
         DEPLOYMENT_NAME = 'zero-downtime-app'
-        CONTAINER_NAME = 'zero-downtime-app'
+        CONTAINER_NAME = 'app'
         IMAGE_NAME = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${BUILD_NUMBER}"
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         ALB_URL = 'http://k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com'
@@ -333,7 +333,6 @@ PY
                             echo "Restored image: ${PREVIOUS_IMAGE}"
                             echo "ALB version: ${ALB_VERSION}"
                             echo "Failed version not served: ${FAILED_VERSION}"
-
                         '''
 
                         error("Deployment failed. Automatic rollback completed and verified.")
