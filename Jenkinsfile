@@ -15,8 +15,10 @@ pipeline {
         K8S_NAMESPACE = 'zero-downtime'
         DEPLOYMENT_NAME = 'zero-downtime-app'
         CONTAINER_NAME = 'app'
+
         IMAGE_NAME = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${BUILD_NUMBER}"
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
         ALB_URL = 'http://k8s-zerodown-zerodown-2877ae3841-1074707335.ap-south-1.elb.amazonaws.com'
     }
 
@@ -24,7 +26,14 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                checkout scm
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/rahulsharma-rks/zero-downtime-k8s.git',
+                        credentialsId: 'github-zero-downtime'
+                    ]]
+                ])
             }
         }
 
@@ -34,7 +43,9 @@ pipeline {
                     set -e
 
                     python3 -m venv .venv
+
                     .venv/bin/pip install --upgrade pip
+
                     .venv/bin/pip install -r app/requirements.txt
                 '''
             }
@@ -61,9 +72,10 @@ pipeline {
                     echo "Building Docker image:"
                     echo "${IMAGE_NAME}"
 
-                    docker build \
+                    docker buildx build \
                         --build-arg APP_VERSION="${BUILD_NUMBER}" \
-                        -t "${IMAGE_NAME}" \
+                        --tag "${IMAGE_NAME}" \
+                        --load \
                         app/
                 '''
             }
@@ -92,9 +104,9 @@ pipeline {
 
                     aws ecr get-login-password \
                         --region "${AWS_REGION}" \
-                    | docker login \
-                        --username AWS \
-                        --password-stdin "${ECR_REGISTRY}"
+                        | docker login \
+                            --username AWS \
+                            --password-stdin "${ECR_REGISTRY}"
                 '''
             }
         }
@@ -110,7 +122,9 @@ pipeline {
                     echo "${IMAGE_NAME}"
 
                     echo "Image digest:"
-                    docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE_NAME}" || true
+                    docker inspect \
+                        --format='{{index .RepoDigests 0}}' \
+                        "${IMAGE_NAME}"
                 '''
             }
         }
@@ -145,7 +159,7 @@ with open("ecr-scan.json") as f:
     data = json.load(f)
 
 counts = data.get("imageScanFindings", {}).get("findingSeverityCounts", {})
-print(counts.get("HIGH", 0))
+print(int(counts.get("HIGH", 0)))
 PY
 )
 
@@ -156,7 +170,7 @@ with open("ecr-scan.json") as f:
     data = json.load(f)
 
 counts = data.get("imageScanFindings", {}).get("findingSeverityCounts", {})
-print(counts.get("CRITICAL", 0))
+print(int(counts.get("CRITICAL", 0)))
 PY
 )
 
@@ -215,7 +229,6 @@ PY
             steps {
                 script {
                     try {
-
                         sh '''
                             set -e
 
@@ -226,12 +239,10 @@ PY
                                 "${CONTAINER_NAME}"="${IMAGE_NAME}" \
                                 -n "${K8S_NAMESPACE}"
 
-                            kubectl rollout status \
-                                deployment/"${DEPLOYMENT_NAME}" \
+                            kubectl rollout status deployment/"${DEPLOYMENT_NAME}" \
                                 -n "${K8S_NAMESPACE}" \
                                 --timeout=5m
                         '''
-
                     } catch (err) {
 
                         echo "Deployment failed. Starting deterministic automatic rollback."
@@ -241,31 +252,121 @@ PY
 
                             PREVIOUS_IMAGE=$(cat .previous_image)
 
-                            echo "Previous healthy image:"
+                            echo "Rolling back to:"
                             echo "${PREVIOUS_IMAGE}"
-
-                            echo "Rolling back deployment to previous image..."
 
                             kubectl set image deployment/"${DEPLOYMENT_NAME}" \
                                 "${CONTAINER_NAME}"="${PREVIOUS_IMAGE}" \
                                 -n "${K8S_NAMESPACE}"
 
-                            kubectl rollout status \
-                                deployment/"${DEPLOYMENT_NAME}" \
+                            kubectl rollout status deployment/"${DEPLOYMENT_NAME}" \
                                 -n "${K8S_NAMESPACE}" \
                                 --timeout=5m
-
-                            echo "Rollback rollout completed."
 
                             RESTORED_IMAGE=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
                                 -n "${K8S_NAMESPACE}" \
                                 -o jsonpath='{.spec.template.spec.containers[0].image}')
 
-                            echo "Restored image:"
+                            echo "Restored deployment image:"
                             echo "${RESTORED_IMAGE}"
 
                             if [ "${RESTORED_IMAGE}" != "${PREVIOUS_IMAGE}" ]; then
-                                echo "ERROR: Restored image does not match previous image."
+                                echo "Rollback image verification failed."
+                                exit 1
+                            fi
+
+                            READY_REPLICAS=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.status.readyReplicas}')
+
+                            DESIRED_REPLICAS=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.spec.replicas}')
+
+                            echo "Ready replicas after rollback: ${READY_REPLICAS}"
+                            echo "Desired replicas: ${DESIRED_REPLICAS}"
+
+                            if [ "${READY_REPLICAS}" != "${DESIRED_REPLICAS}" ]; then
+                                echo "Rollback replica verification failed."
+                                exit 1
+                            fi
+
+                            HTTP_STATUS=$(curl \
+                                --silent \
+                                --output /dev/null \
+                                --write-out '%{http_code}' \
+                                --max-time 10 \
+                                "${ALB_URL}/health")
+
+                            echo "ALB /health status after rollback: ${HTTP_STATUS}"
+
+                            if [ "${HTTP_STATUS}" != "200" ]; then
+                                echo "ALB health verification failed after rollback."
+                                exit 1
+                            fi
+
+                            ALB_VERSION=$(curl \
+                                --silent \
+                                --max-time 10 \
+                                "${ALB_URL}/" \
+                                | sed -n 's/.*Application Version: <strong>\\([^<]*\\)<\\/strong>.*/\\1/p')
+
+                            EXPECTED_VERSION=$(printf '%s' "${PREVIOUS_IMAGE}" \
+                                | awk -F: '{print $NF}')
+
+                            echo "ALB version after rollback: ${ALB_VERSION}"
+                            echo "Expected version: ${EXPECTED_VERSION}"
+
+                            if [ "${ALB_VERSION}" != "${EXPECTED_VERSION}" ]; then
+                                echo "ALB version verification failed after rollback."
+                                exit 1
+                            fi
+
+                            FAILED_VERSION=$(printf '%s' "${IMAGE_NAME}" \
+                                | awk -F: '{print $NF}')
+
+                            echo "Failed deployment version: ${FAILED_VERSION}"
+
+                            if [ "${ALB_VERSION}" = "${FAILED_VERSION}" ]; then
+                                echo "Failed version is still being served by ALB."
+                                exit 1
+                            fi
+
+                            touch .rollback_verified
+
+                            echo "AUTOMATIC ROLLBACK VERIFIED"
+                        '''
+
+                        error("Deployment failed. Automatic rollback completed and verified.")
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    if (fileExists('.rollback_verified')) {
+                        echo "Skipping normal deployment verification because automatic rollback was verified."
+                    } else {
+                        sh '''
+                            set -e
+
+                            echo "Verifying successful deployment..."
+
+                            kubectl rollout status deployment/"${DEPLOYMENT_NAME}" \
+                                -n "${K8S_NAMESPACE}" \
+                                --timeout=2m
+
+                            CURRENT_IMAGE=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
+                                -n "${K8S_NAMESPACE}" \
+                                -o jsonpath='{.spec.template.spec.containers[0].image}')
+
+                            echo "Current deployment image:"
+                            echo "${CURRENT_IMAGE}"
+
+                            if [ "${CURRENT_IMAGE}" != "${IMAGE_NAME}" ]; then
+                                echo "Deployment image verification failed."
                                 exit 1
                             fi
 
@@ -281,11 +382,9 @@ PY
                             echo "Desired replicas: ${DESIRED_REPLICAS}"
 
                             if [ "${READY_REPLICAS}" != "${DESIRED_REPLICAS}" ]; then
-                                echo "ERROR: Deployment is not fully ready after rollback."
+                                echo "Replica verification failed."
                                 exit 1
                             fi
-
-                            echo "Validating ALB health..."
 
                             HTTP_STATUS=$(curl \
                                 --silent \
@@ -297,119 +396,19 @@ PY
                             echo "ALB /health status: ${HTTP_STATUS}"
 
                             if [ "${HTTP_STATUS}" != "200" ]; then
-                                echo "ERROR: ALB health check failed after rollback."
+                                echo "ALB health verification failed."
                                 exit 1
                             fi
 
-                            echo "Validating restored application version..."
-
-                            ALB_VERSION=$(curl \
-                                --silent \
-                                --max-time 10 \
-                                "${ALB_URL}/" \
-                                | sed -n 's/.*Application Version: <strong>\\([^<]*\\)<\\/strong>.*/\\1/p')
-
-                            echo "ALB application version: ${ALB_VERSION}"
-
-                            EXPECTED_VERSION=$(printf '%s' "${PREVIOUS_IMAGE}" | awk -F: '{print $NF}')
-
-                            echo "Expected application version: ${EXPECTED_VERSION}"
-
-                            if [ "${ALB_VERSION}" != "${EXPECTED_VERSION}" ]; then
-                                echo "ERROR: ALB is not serving the restored version."
-                                exit 1
-                            fi
-
-                            FAILED_VERSION=$(printf '%s' "${IMAGE_NAME}" | awk -F: '{print $NF}')
-
-                            if [ "${ALB_VERSION}" = "${FAILED_VERSION}" ]; then
-                                echo "ERROR: Failed deployment version is still being served."
-                                exit 1
-                            fi
-
-                            touch .rollback_verified
-
-                            echo "AUTOMATIC ROLLBACK VERIFIED"
-                            echo "Restored image: ${PREVIOUS_IMAGE}"
-                            echo "ALB version: ${ALB_VERSION}"
-                            echo "Failed version not served: ${FAILED_VERSION}"
+                            echo "Deployment verification successful."
                         '''
-
-                        error("Deployment failed. Automatic rollback completed and verified.")
-
                     }
                 }
-            }
-        }
-
-        stage('Verify Deployment') {
-            when {
-                expression {
-                    !fileExists('.rollback_verified')
-                }
-            }
-
-            steps {
-                sh '''
-                    set -e
-
-                    echo "Verifying successful deployment..."
-
-                    kubectl rollout status \
-                        deployment/"${DEPLOYMENT_NAME}" \
-                        -n "${K8S_NAMESPACE}" \
-                        --timeout=2m
-
-                    CURRENT_IMAGE=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
-                        -n "${K8S_NAMESPACE}" \
-                        -o jsonpath='{.spec.template.spec.containers[0].image}')
-
-                    echo "Current deployment image:"
-                    echo "${CURRENT_IMAGE}"
-
-                    if [ "${CURRENT_IMAGE}" != "${IMAGE_NAME}" ]; then
-                        echo "ERROR: Deployment image does not match build image."
-                        exit 1
-                    fi
-
-                    READY_REPLICAS=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
-                        -n "${K8S_NAMESPACE}" \
-                        -o jsonpath='{.status.readyReplicas}')
-
-                    DESIRED_REPLICAS=$(kubectl get deployment "${DEPLOYMENT_NAME}" \
-                        -n "${K8S_NAMESPACE}" \
-                        -o jsonpath='{.spec.replicas}')
-
-                    echo "Ready replicas: ${READY_REPLICAS}"
-                    echo "Desired replicas: ${DESIRED_REPLICAS}"
-
-                    if [ "${READY_REPLICAS}" != "${DESIRED_REPLICAS}" ]; then
-                        echo "ERROR: Deployment is not fully ready."
-                        exit 1
-                    fi
-
-                    HTTP_STATUS=$(curl \
-                        --silent \
-                        --output /dev/null \
-                        --write-out '%{http_code}' \
-                        --max-time 10 \
-                        "${ALB_URL}/health")
-
-                    echo "ALB /health status: ${HTTP_STATUS}"
-
-                    if [ "${HTTP_STATUS}" != "200" ]; then
-                        echo "ERROR: ALB health check failed."
-                        exit 1
-                    fi
-
-                    echo "Deployment verification successful."
-                '''
             }
         }
     }
 
     post {
-
         success {
             script {
                 if (fileExists('.rollback_verified')) {
