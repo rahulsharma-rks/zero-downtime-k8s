@@ -108,6 +108,33 @@ pipeline {
             }
         }
 
+        stage('Trivy Image Scan') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=========================================="
+                    echo "TRIVY IMAGE VULNERABILITY SCAN"
+                    echo "=========================================="
+
+                    echo "Image: ${IMAGE_NAME}"
+
+                    trivy image \
+                        --scanners vuln \
+                        --severity HIGH,CRITICAL \
+                        --ignore-unfixed \
+                        --exit-code 1 \
+                        --no-progress \
+                        "${IMAGE_NAME}"
+
+                    echo ""
+                    echo "=========================================="
+                    echo "TRIVY SCAN PASSED"
+                    echo "=========================================="
+                '''
+            }
+        }
+
         stage('ECR Login') {
             steps {
                 sh '''
