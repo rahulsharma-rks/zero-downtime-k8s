@@ -5,6 +5,7 @@ metadata:
   namespace: zero-downtime
   labels:
     app: zero-downtime-app
+
 spec:
   replicas: 3
 
@@ -22,12 +23,26 @@ spec:
     metadata:
       labels:
         app: zero-downtime-app
+
     spec:
       terminationGracePeriodSeconds: 30
 
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
       containers:
         - name: app
-          image: 520701146276.dkr.ecr.ap-south-1.amazonaws.com/zero-downtime-app:1.0.3
+
+          image: 520701146276.dkr.ecr.ap-south-1.amazonaws.com/zero-downtime-app:29
 
           ports:
             - containerPort: 8080
@@ -40,6 +55,17 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
 
           readinessProbe:
             httpGet:
