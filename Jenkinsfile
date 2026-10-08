@@ -218,27 +218,62 @@ pipeline {
 
                     while [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; do
 
+                        rm -f /tmp/ecr-scan-error
+
+                        set +e
+
                         SCAN_STATUS=$(aws ecr describe-image-scan-findings \
                             --repository-name "${ECR_REPOSITORY}" \
                             --image-id imageDigest="${ECR_DIGEST}" \
                             --region "${AWS_REGION}" \
                             --query 'imageScanStatus.status' \
-                            --output text)
+                            --output text \
+                            2>/tmp/ecr-scan-error)
 
-                        echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS} - Scan status: ${SCAN_STATUS}"
+                        AWS_EXIT_CODE=$?
 
-                        if [ "${SCAN_STATUS}" = "COMPLETE" ]; then
-                            break
-                        fi
+                        set -e
 
-                        if [ "${SCAN_STATUS}" = "FAILED" ]; then
-                            echo "ERROR: ECR image scan failed."
-                            exit 1
+                        if [ "${AWS_EXIT_CODE}" -ne 0 ]; then
+
+                            if grep -q "ScanNotFoundException" /tmp/ecr-scan-error; then
+
+                                echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS} - ECR scan not available yet."
+
+                            else
+
+                                echo "ERROR: Failed to retrieve ECR scan status."
+                                cat /tmp/ecr-scan-error
+                                rm -f /tmp/ecr-scan-error
+                                exit "${AWS_EXIT_CODE}"
+
+                            fi
+
+                        else
+
+                            echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS} - Scan status: ${SCAN_STATUS}"
+
+                            if [ "${SCAN_STATUS}" = "COMPLETE" ]; then
+                                break
+                            fi
+
+                            if [ "${SCAN_STATUS}" = "FAILED" ]; then
+                                echo "ERROR: ECR image scan failed."
+                                rm -f /tmp/ecr-scan-error
+                                exit 1
+                            fi
+
                         fi
 
                         ATTEMPT=$((ATTEMPT + 1))
-                        sleep 10
+
+                        if [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; then
+                            sleep 10
+                        fi
+
                     done
+
+                    rm -f /tmp/ecr-scan-error
 
                     if [ "${SCAN_STATUS}" != "COMPLETE" ]; then
                         echo "ERROR: ECR image scan did not complete within 5 minutes."
