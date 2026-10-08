@@ -171,10 +171,133 @@ pipeline {
                     echo "${IMAGE_NAME}"
 
                     echo ""
-                    echo "Image digest:"
+                    echo "Local image digest:"
 
                     docker inspect "${IMAGE_NAME}" \
                         --format '{{index .RepoDigests 0}}' || true
+                '''
+            }
+        }
+
+        stage('ECR Scan Verification') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "=========================================="
+                    echo "ECR IMAGE SCAN VERIFICATION"
+                    echo "=========================================="
+
+                    echo "Repository: ${ECR_REPOSITORY}"
+                    echo "Image tag: ${IMAGE_TAG}"
+
+                    echo ""
+                    echo "Retrieving ECR image digest..."
+
+                    ECR_DIGEST=$(aws ecr describe-images \
+                        --repository-name "${ECR_REPOSITORY}" \
+                        --image-ids imageTag="${IMAGE_TAG}" \
+                        --region "${AWS_REGION}" \
+                        --query 'imageDetails[0].imageDigest' \
+                        --output text)
+
+                    if [ -z "${ECR_DIGEST}" ] || [ "${ECR_DIGEST}" = "None" ]; then
+                        echo "ERROR: Unable to retrieve ECR image digest."
+                        exit 1
+                    fi
+
+                    echo "ECR image digest:"
+                    echo "${ECR_DIGEST}"
+
+                    echo ""
+                    echo "Waiting for ECR scan to complete..."
+
+                    MAX_ATTEMPTS=30
+                    ATTEMPT=1
+                    SCAN_STATUS=""
+
+                    while [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; do
+
+                        SCAN_STATUS=$(aws ecr describe-image-scan-findings \
+                            --repository-name "${ECR_REPOSITORY}" \
+                            --image-id imageDigest="${ECR_DIGEST}" \
+                            --region "${AWS_REGION}" \
+                            --query 'imageScanStatus.status' \
+                            --output text)
+
+                        echo "Attempt ${ATTEMPT}/${MAX_ATTEMPTS} - Scan status: ${SCAN_STATUS}"
+
+                        if [ "${SCAN_STATUS}" = "COMPLETE" ]; then
+                            break
+                        fi
+
+                        if [ "${SCAN_STATUS}" = "FAILED" ]; then
+                            echo "ERROR: ECR image scan failed."
+                            exit 1
+                        fi
+
+                        ATTEMPT=$((ATTEMPT + 1))
+                        sleep 10
+                    done
+
+                    if [ "${SCAN_STATUS}" != "COMPLETE" ]; then
+                        echo "ERROR: ECR image scan did not complete within 5 minutes."
+                        exit 1
+                    fi
+
+                    echo ""
+                    echo "=========================================="
+                    echo "ECR SCAN FINDINGS"
+                    echo "=========================================="
+
+                    FINDING_COUNTS=$(aws ecr describe-image-scan-findings \
+                        --repository-name "${ECR_REPOSITORY}" \
+                        --image-id imageDigest="${ECR_DIGEST}" \
+                        --region "${AWS_REGION}" \
+                        --query 'imageScanFindings.findingSeverityCounts' \
+                        --output json)
+
+                    echo "${FINDING_COUNTS}"
+
+                    HIGH_COUNT=$(aws ecr describe-image-scan-findings \
+                        --repository-name "${ECR_REPOSITORY}" \
+                        --image-id imageDigest="${ECR_DIGEST}" \
+                        --region "${AWS_REGION}" \
+                        --query 'imageScanFindings.findingSeverityCounts.HIGH' \
+                        --output text)
+
+                    if [ "${HIGH_COUNT}" = "None" ]; then
+                        HIGH_COUNT=0
+                    fi
+
+                    CRITICAL_COUNT=$(aws ecr describe-image-scan-findings \
+                        --repository-name "${ECR_REPOSITORY}" \
+                        --image-id imageDigest="${ECR_DIGEST}" \
+                        --region "${AWS_REGION}" \
+                        --query 'imageScanFindings.findingSeverityCounts.CRITICAL' \
+                        --output text)
+
+                    if [ "${CRITICAL_COUNT}" = "None" ]; then
+                        CRITICAL_COUNT=0
+                    fi
+
+                    echo ""
+                    echo "ECR vulnerability summary:"
+                    echo "HIGH: ${HIGH_COUNT}"
+                    echo "CRITICAL: ${CRITICAL_COUNT}"
+
+                    echo ""
+                    echo "=========================================="
+                    echo "ECR SCAN POLICY"
+                    echo "=========================================="
+
+                    echo "Policy: REPORT ONLY"
+                    echo "ECR findings are reported but do not currently block deployment."
+
+                    echo ""
+                    echo "=========================================="
+                    echo "ECR SCAN VERIFICATION COMPLETE"
+                    echo "=========================================="
                 '''
             }
         }
