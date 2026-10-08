@@ -123,6 +123,7 @@ pipeline {
                     echo "${IMAGE_NAME}"
 
                     echo "Image digest:"
+
                     docker inspect \
                         --format='{{index .RepoDigests 0}}' \
                         "${IMAGE_NAME}"
@@ -153,39 +154,66 @@ pipeline {
 
                             echo "ECR scan results available."
 
-                            HIGH=$(python3 - <<'PY'
+                            python3 -c '
 import json
 
 with open("ecr-scan.json") as f:
     data = json.load(f)
 
-counts = data.get("imageScanFindings", {}).get("findingSeverityCounts", {})
-print(int(counts.get("HIGH", 0)))
-PY
-)
+scan = data.get("imageScanFindings", {})
 
-                            CRITICAL=$(python3 - <<'PY'
-import json
+findings = scan.get("findings", [])
+counts = scan.get("findingSeverityCounts", {})
 
-with open("ecr-scan.json") as f:
-    data = json.load(f)
+high = int(counts.get("HIGH", 0))
+critical = int(counts.get("CRITICAL", 0))
 
-counts = data.get("imageScanFindings", {}).get("findingSeverityCounts", {})
-print(int(counts.get("CRITICAL", 0)))
-PY
-)
+print("")
+print("========================================")
+print("ECR SECURITY SCAN SUMMARY")
+print("========================================")
+print(f"HIGH     : {high}")
+print(f"CRITICAL : {critical}")
+print("========================================")
 
-                            echo "ECR Scan Findings:"
-                            echo "HIGH     = ${HIGH}"
-                            echo "CRITICAL = ${CRITICAL}"
+interesting = [
+    finding
+    for finding in findings
+    if finding.get("severity") in {"HIGH", "CRITICAL"}
+]
+
+if not interesting:
+    print("")
+    print("No HIGH or CRITICAL ECR findings.")
+else:
+    print("")
+    print("HIGH / CRITICAL FINDINGS")
+    print("----------------------------------------")
+
+    for finding in interesting:
+        severity = finding.get("severity", "N/A")
+        name = finding.get("name", "N/A")
+        uri = finding.get("uri", "N/A")
+        description = finding.get("description", "N/A")
+
+        print(f"Severity     : {severity}")
+        print(f"Finding      : {name}")
+        print(f"Package URI  : {uri}")
+        print(f"Description  : {description}")
+        print("----------------------------------------")
+
+print("")
+print("Policy: report-only.")
+print("Trivy remains the blocking security gate.")
+'
 
                             echo "ECR scan verification completed."
-                            echo "Policy: report-only. Trivy remains the blocking security gate."
 
                             break
                         fi
 
                         echo "ECR scan results not ready yet."
+
                         cat /tmp/ecr-scan-error || true
 
                         ATTEMPT=$((ATTEMPT + 1))
@@ -193,6 +221,7 @@ PY
                         if [ "${ATTEMPT}" -le "${MAX_ATTEMPTS}" ]; then
                             sleep 10
                         fi
+
                     done
 
                     if [ "${ATTEMPT}" -gt "${MAX_ATTEMPTS}" ]; then
@@ -347,9 +376,13 @@ PY
         stage('Verify Deployment') {
             steps {
                 script {
+
                     if (fileExists('.rollback_verified')) {
+
                         echo "Skipping normal deployment verification because automatic rollback was verified."
+
                     } else {
+
                         sh '''
                             set -e
 
@@ -410,23 +443,34 @@ PY
     }
 
     post {
+
         success {
             script {
+
                 if (fileExists('.rollback_verified')) {
+
                     echo "Build succeeded with rollback verification marker present."
+
                 } else {
+
                     echo "Deployment completed successfully."
+
                 }
             }
         }
 
         failure {
             script {
+
                 if (fileExists('.rollback_verified')) {
+
                     echo "AUTOMATIC ROLLBACK VERIFIED."
                     echo "The deployment failed as expected and the previous healthy version was restored successfully."
+
                 } else {
+
                     echo "Build failed without a verified automatic rollback."
+
                 }
             }
         }
