@@ -75,6 +75,7 @@ pipeline {
                     docker buildx build \
                         --build-arg APP_VERSION="${BUILD_NUMBER}" \
                         --tag "${IMAGE_NAME}" \
+                        --provenance=false \
                         --load \
                         app/
                 '''
